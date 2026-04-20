@@ -104,6 +104,18 @@ Two log files are written to the output directory:
 
 **Actions:** `classify`, `undo`, `error`, `skip`
 
+## Export
+
+Click **Export** in the toolbar to save a CSV of all videos and their classifications.
+
+| Column | Description |
+|---|---|
+| `video` | Original filename |
+| `class` | Assigned class name, or `unclassified` for pending/error videos |
+| `path` | Relative path within the output directory |
+
+Defaults to `<outdir>/annotations.csv`. A save dialog lets you pick a different location.
+
 ## Supported Formats
 
 `.mp4` `.mkv` `.avi` `.mov` `.wmv` `.flv` `.webm` `.m4v` `.mpg` `.mpeg` `.3gp` `.ts` `.mts`

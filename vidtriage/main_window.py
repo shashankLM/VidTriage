@@ -7,6 +7,7 @@ from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QSlider, QSplitter, QMessageBox, QFrame, QDialog, QTextBrowser, QApplication,
+    QFileDialog,
 )
 
 from .models import AppConfig, ClassEntry, FileStatus, VideoItem
@@ -67,12 +68,15 @@ class MainWindow(QMainWindow):
         btn_setup.clicked.connect(self._reopen_setup)
         btn_summary = QPushButton("Summary")
         btn_summary.clicked.connect(self._show_summary)
+        btn_export = QPushButton("Export")
+        btn_export.clicked.connect(self._export_annotations)
         btn_help = QPushButton("Help (h)")
         btn_help.clicked.connect(self._show_help)
         btn_quit = QPushButton("Quit")
         btn_quit.clicked.connect(self.close)
         toolbar.addWidget(btn_setup)
         toolbar.addWidget(btn_summary)
+        toolbar.addWidget(btn_export)
         toolbar.addWidget(btn_help)
         toolbar.addStretch()
         toolbar.addWidget(btn_quit)
@@ -559,6 +563,41 @@ class MainWindow(QMainWindow):
         btn_close.clicked.connect(dlg.accept)
         layout.addWidget(btn_close)
         dlg.exec()
+
+    # --- Export ---
+
+    def _export_annotations(self) -> None:
+        import csv
+        output_dir = self._config.output_dir
+        default_path = str(output_dir / "annotations.csv") if output_dir else ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Annotations", default_path, "CSV Files (*.csv)",
+        )
+        if not path:
+            return
+
+        unclassified_tag = "unclassified"
+        rows: list[tuple[str, str, str]] = []
+        for item in self._pending:
+            name = item.original_path.name
+            rows.append((name, unclassified_tag, name))
+        for item in self._classified:
+            name = item.original_path.name
+            if item.status == FileStatus.ERROR:
+                rows.append((name, unclassified_tag, name))
+            elif item.class_entry:
+                rows.append((name, item.class_entry.name, f"{item.class_entry.name}/{name}"))
+            else:
+                rows.append((name, unclassified_tag, name))
+
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["video", "class", "path"])
+            writer.writerows(rows)
+
+        QMessageBox.information(
+            self, "Export", f"Exported {len(rows)} entries to\n{path}",
+        )
 
     # --- Help ---
 
