@@ -2,8 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+.eggs/
+.claude/
 dist/
 build/
-.eggs/
-
 vidtriage_log.csv

@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import os
-from collections import Counter
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QComboBox, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMessageBox, QPushButton, QStackedWidget,
     QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from .config import load_config, save_config, parse_classes
-from .io_ops import discover_videos, load_log
-from .models import AppConfig
+from .config import load_all_sessions, save_config, parse_classes
+from .io_ops import discover_videos, scan_output_subfolders
+from .models import ERRORS_FOLDER, AppConfig
 
 
 class _FocusOutEdit(QTextEdit):
@@ -35,21 +34,31 @@ class SetupWizard(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("VidTriage — Setup")
-        self.setMinimumSize(520, 520)
+        self.setMinimumSize(520, 540)
         self.result_config: AppConfig | None = None
-        self._prev_classes: list[str] | None = None
+        self._last_output_text: str = ""
 
-        saved = load_config()
+        self._sessions = load_all_sessions()
         layout = QVBoxLayout(self)
 
+        # --- Session dropdown ---
+        session_row = QHBoxLayout()
+        session_row.addWidget(QLabel("Session:"))
+        self._session_combo = QComboBox()
+        for cfg in self._sessions:
+            self._session_combo.addItem(self._session_label(cfg))
+        self._session_combo.addItem("+ New Session")
+        session_row.addWidget(self._session_combo, stretch=1)
+        layout.addLayout(session_row)
+        layout.addSpacing(8)
+
+        # --- Directory rows ---
         self._input_edit = self._add_dir_row(
-            layout, "Input directory (videos to classify):",
-            prefill_input or saved.input_dir,
+            layout, "Input directory (videos to classify):", None,
         )
         layout.addSpacing(8)
         self._output_edit = self._add_dir_row(
-            layout, "Output directory (classified videos):",
-            prefill_output or saved.output_dir,
+            layout, "Output directory (classified videos):", None,
         )
 
         self._info_label = QLabel("")
@@ -59,7 +68,7 @@ class SetupWizard(QDialog):
 
         layout.addSpacing(8)
         layout.addWidget(QLabel("Classes (keys auto-assigned 1-9):"))
-        self._build_class_widgets(layout, saved.classes)
+        self._build_class_widgets(layout, [])
 
         layout.addStretch()
 
@@ -73,8 +82,69 @@ class SetupWizard(QDialog):
         btn_layout.addWidget(btn_launch)
         layout.addLayout(btn_layout)
 
-        self._input_edit.textChanged.connect(self._update_info)
-        self._output_edit.textChanged.connect(self._update_info)
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(300)
+        self._debounce_timer.timeout.connect(self._update_info)
+
+        self._input_edit.textChanged.connect(lambda: self._debounce_timer.start())
+        self._output_edit.textChanged.connect(lambda: self._debounce_timer.start())
+
+        # --- Initial session selection ---
+        initial_index = len(self._sessions)  # "New Session"
+        prefill_resolved = Path(prefill_output).resolve() if prefill_output else None
+        if prefill_resolved:
+            for i, sess in enumerate(self._sessions):
+                if sess.output_dir == prefill_resolved:
+                    initial_index = i
+                    break
+        elif self._sessions:
+            initial_index = 0
+
+        self._session_combo.setCurrentIndex(initial_index)
+        self._on_session_changed(initial_index)
+
+        if initial_index == len(self._sessions):
+            if prefill_input:
+                self._input_edit.setText(str(prefill_input))
+            if prefill_output:
+                self._output_edit.setText(str(prefill_output))
+        elif prefill_input:
+            self._input_edit.setText(str(prefill_input))
+
+        self._last_output_text = self._output_edit.text().strip()
+        self._debounce_timer.stop()
+        self._update_info()
+
+        self._session_combo.currentIndexChanged.connect(self._on_session_changed)
+
+    # --- Session helpers ---
+
+    @staticmethod
+    def _session_label(config: AppConfig) -> str:
+        if not config.output_dir:
+            return "Unnamed"
+        out_name = config.output_dir.name
+        in_name = config.input_dir.name if config.input_dir else "?"
+        return f"{out_name}  ({in_name})"
+
+    def _on_session_changed(self, index: int) -> None:
+        if index < len(self._sessions):
+            config = self._sessions[index]
+            self._input_edit.setText(str(config.input_dir) if config.input_dir else "")
+            self._output_edit.setText(str(config.output_dir) if config.output_dir else "")
+            if config.classes:
+                self._class_edit.setPlainText("\n".join(c.name for c in config.classes))
+            else:
+                self._class_edit.setPlainText("")
+        else:
+            self._input_edit.setText("")
+            self._output_edit.setText("")
+            self._class_edit.setPlainText("")
+
+        self._populate_table()
+        self._last_output_text = self._output_edit.text().strip()
+        self._debounce_timer.stop()
         self._update_info()
 
     # --- UI builders ---
@@ -114,12 +184,13 @@ class SetupWizard(QDialog):
         self._class_stack.addWidget(self._class_edit)
 
         if saved_classes:
-            user_classes = [c.name for c in saved_classes if c.name != c.key]
+            user_classes = [c.name for c in saved_classes]
             self._class_edit.setPlainText("\n".join(user_classes))
 
         self._populate_table()
         self._class_stack.setCurrentIndex(0)
         layout.addWidget(self._class_stack)
+        self._class_stack.setEnabled(False)
 
     # --- Class table/edit toggling ---
 
@@ -149,44 +220,47 @@ class SetupWizard(QDialog):
 
     def _update_info(self) -> None:
         parts: list[str] = []
-        self._prev_classes = None
 
         input_text = self._input_edit.text().strip()
-        if input_text and Path(input_text).is_dir():
+        output_text = self._output_edit.text().strip()
+        input_valid = bool(input_text) and Path(input_text).is_dir()
+        output_valid = bool(output_text) and Path(output_text).is_dir()
+        output_changed = output_text != self._last_output_text
+        self._last_output_text = output_text
+
+        if input_valid:
             videos = discover_videos(Path(input_text))
             parts.append(f"Input: {len(videos)} videos found")
 
-        output_text = self._output_edit.text().strip()
-        if output_text and Path(output_text).is_dir():
-            log = load_log(Path(output_text))
-            if log:
-                classified = self._reconcile_log(log)
-                counts = Counter(r.get("class_name", "") for r in classified.values())
-                summary = ", ".join(f"{name}: {n}" for name, n in counts.most_common())
-                parts.append(f"Previous session: {len(classified)} classified ({summary})")
+        if output_valid:
+            folder_stats: list[tuple[str, int]] = []
+            total_classified = 0
+            error_count = 0
+            folder_classes: list[str] = []
 
-                prev_classes = list(dict.fromkeys(
-                    r.get("class_name", "") for r in classified.values()
-                    if r.get("class_name", "") and r.get("action") == "classify"
-                ))
-                if prev_classes:
-                    self._prev_classes = prev_classes
+            for name, vids in scan_output_subfolders(Path(output_text)):
+                if name == ERRORS_FOLDER:
+                    error_count = len(vids)
+                else:
+                    folder_stats.append((name, len(vids)))
+                    total_classified += len(vids)
+                    folder_classes.append(name)
+
+            if folder_stats or error_count:
+                summary_parts = [f"{name}: {n}" for name, n in folder_stats]
+                if error_count:
+                    summary_parts.append(f"errors: {error_count}")
+                total = total_classified + error_count
+                parts.append(f"Output: {total} videos ({', '.join(summary_parts)})")
             else:
                 parts.append("Output: no previous session")
 
-        self._info_label.setText("  |  ".join(parts) if parts else "")
+            if folder_classes and output_changed:
+                self._class_edit.setPlainText("\n".join(folder_classes))
+                self._populate_table()
 
-    @staticmethod
-    def _reconcile_log(log: list[dict[str, str]]) -> dict[str, dict[str, str]]:
-        classified: dict[str, dict[str, str]] = {}
-        for row in log:
-            src = row.get("source_path", "")
-            action = row.get("action", "")
-            if action == "undo":
-                classified.pop(src, None)
-            elif action in ("classify", "error"):
-                classified[src] = row
-        return classified
+        self._class_stack.setEnabled(bool(input_valid and output_valid))
+        self._info_label.setText("  |  ".join(parts) if parts else "")
 
     # --- Validation ---
 
@@ -236,22 +310,6 @@ class SetupWizard(QDialog):
         if errors:
             QMessageBox.warning(self, "Validation Error", "\n".join(errors))
             return
-
-        if self._prev_classes:
-            user_names = [e.name for e in entries if e.name != e.key]
-            if user_names != self._prev_classes:
-                prev_str = ", ".join(self._prev_classes)
-                reply = QMessageBox.question(
-                    self,
-                    "Previous session found",
-                    f"The output directory has a previous session with classes:\n"
-                    f"{prev_str}\n\n"
-                    f"Use previous classes instead?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    self._class_edit.setPlainText("\n".join(self._prev_classes))
-                    entries, _ = parse_classes("\n".join(self._prev_classes))
 
         config = AppConfig(
             input_dir=Path(input_text).resolve(),

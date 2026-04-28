@@ -6,8 +6,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from .config import load_config
 from .wizard import SetupWizard
+from .session import Session
 from .main_window import MainWindow
 
 
@@ -33,15 +33,15 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("VidTriage")
 
-    saved = load_config()
-    prefill_input = args.input_dir or saved.input_dir
-    prefill_output = args.output_dir or saved.output_dir
-
-    wizard = SetupWizard(prefill_input=prefill_input, prefill_output=prefill_output)
+    wizard = SetupWizard(prefill_input=args.input_dir, prefill_output=args.output_dir)
     if wizard.exec() != wizard.DialogCode.Accepted or wizard.result_config is None:
         sys.exit(0)
 
-    window = MainWindow(wizard.result_config)
+    rc = wizard.result_config
+    session = Session(rc.input_dir, rc.output_dir, rc.classes)
+    session.load()
+
+    window = MainWindow(session)
     window.show()
     sys.exit(app.exec())
 

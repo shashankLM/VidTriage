@@ -31,14 +31,13 @@ python run.py -i /path/to/videos -o /path/to/output
   │ video_02.mp4 │  ──[2]──>   │ dog/video_02.mp4     │
   │ video_03.mp4 │  ──[x]──>   │ _errors/video_03.mp4 │
   │ video_04.mp4 │             │                      │
-  └──────────────┘             │ vidtriage_log.csv    │
-                               └──────────────────────┘
+  └──────────────┘             └──────────────────────┘
 ```
 
 1. **Setup** — Pick input/output directories and define class names
 2. **Classify** — Watch each video and press a number key to classify
 3. **Files move** — Videos are moved (not copied) into class subdirectories
-4. **Resume** — Relaunch anytime; previously classified files are restored from the log
+4. **Resume** — Relaunch anytime; previously classified files are detected from output folders
 
 ## Setup Dialog
 
@@ -46,9 +45,12 @@ On launch, a setup dialog lets you configure:
 
 | Field | Description |
 |---|---|
+| **Session** | Dropdown of saved sessions (defaults to most recent), or "+ New Session" |
 | **Input directory** | Folder containing videos to classify (must be readable) |
 | **Output directory** | Where classified videos are moved (must be writable) |
 | **Classes** | One name per line — keys auto-assigned `1`-`9` |
+
+The session dropdown remembers all previous input/output/class configurations. Selecting a session populates all fields. Sessions are matched by output directory — launching with the same output dir updates the existing session entry.
 
 Classes are shown in a table view with their key assignments. Click the table to edit as text.
 
@@ -59,11 +61,29 @@ dog
 bird
 skip
 ```
-Maps to: `[1] cat` `[2] dog` `[3] bird` `[4] skip` `[5] 5` ... `[9] 9`
+Maps to: `[1] cat` `[2] dog` `[3] bird` `[4] skip`
 
 > **Directory rules:** Input and output must be separate, non-overlapping directories.
 > Neither can be inside the other. Both must exist and be accessible.
-> Last-used values are remembered across sessions (`~/.vidtriage/config.json`).
+> Sessions are persisted in `~/.vidtriage/config.json`.
+
+## Menu Bar
+
+| Menu | Items |
+|---|---|
+| **File** | Reopen Setup, Export Annotations, Quit |
+| **Edit** | Undo, Change Classes, Skip |
+| **View** | Frame Number Overlay, File Explorer, Fullscreen, Summary |
+| **Playback** | Speed, Frame Step, End Behavior |
+| **Help** | Keyboard Shortcuts |
+
+### Playback Options
+
+| Setting | Values | Default |
+|---|---|---|
+| **Speed** | 0.25x, 0.5x, 0.75x, 1x, 1.25x, 1.5x, 1.75x, 2x | 1x |
+| **Frame Step** | 1, 2, 5, 10 frames per arrow key press | 1 |
+| **End Behavior** | Next Video (auto-advance), Loop, Stop | Next Video |
 
 ## Keybindings
 
@@ -71,13 +91,16 @@ Maps to: `[1] cat` `[2] dog` `[3] bird` `[4] skip` `[5] 5` ... `[9] 9`
 |---|---|
 | `1` – `9` | Classify with mapped class and auto-advance |
 | `Space` | Play / pause |
-| `Right` | Next frame |
-| `Left` | Previous frame |
-| `Down` | Next file |
-| `Up` | Previous file |
+| `→` | Step forward (configurable frame count) |
+| `←` | Step backward (configurable frame count) |
+| `↓` | Next file |
+| `↑` | Previous file |
 | `Tab` | Toggle focus between pending and classified lists |
+| `s` | Skip to next pending video |
+| `e` | Toggle file explorer panel |
 | `x` | Move current file to `_errors/` |
-| `h` / `?` | Open help overlay |
+| `h` / `?` | Open help |
+| `F11` | Toggle fullscreen |
 | `Ctrl+Z` | Undo last classification |
 | `Ctrl+Q` | Quit |
 
@@ -90,23 +113,19 @@ The left pane has two lists in a vertical split:
 
 The active list has a blue border. Use `Tab` to switch between them.
 Selecting a classified video lets you reclassify it — press a number key to move it to a different class.
+Toggle the panel with `e` or via **View → File Explorer**.
 
 ## Logs
 
-Two log files are written to the output directory:
+An activity log is written to the output directory:
 
 | File | Purpose |
 |---|---|
-| `vidtriage_log.csv` | Structured action log — used for resume and auditing |
 | `vidtriage_activity.log` | Human-readable activity log with timestamps |
-
-**CSV columns:** `timestamp`, `source_path`, `destination_path`, `class_key`, `class_name`, `action`
-
-**Actions:** `classify`, `undo`, `error`, `skip`
 
 ## Export
 
-Click **Export** in the toolbar to save a CSV of all videos and their classifications.
+Use **File → Export Annotations** to save a CSV of all videos and their classifications.
 
 | Column | Description |
 |---|---|
@@ -127,10 +146,11 @@ run.py                   Entry point
 vidtriage/
   __main__.py            CLI args + app bootstrap
   wizard.py              Setup dialog (dirs + classes)
-  main_window.py         Main GUI, keybindings, classification logic
-  player.py              OpenCV video player (frame-by-frame via QTimer)
+  main_window.py         Main GUI, menubar, keybindings, classification logic
+  player.py              OpenCV video player with speed/step/overlay controls
   file_explorer.py       Two-list file explorer with status colors
-  io_ops.py              File move/undo/log operations
+  session.py             Session state — single source of truth for all data
+  io_ops.py              File move/undo operations
   config.py              Config persistence + class parsing
   models.py              Dataclasses (VideoItem, ClassEntry, AppConfig)
 ```

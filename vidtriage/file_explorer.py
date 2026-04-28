@@ -6,19 +6,13 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QSplitter,
 )
 
-from .models import FileStatus, VideoItem
+from .models import VideoItem
 
 FOCUSED_STYLE = "QListWidget { border: 2px solid #42a5f5; }"
 UNFOCUSED_STYLE = "QListWidget { border: 2px solid #444; }"
 
-STATUS_COLORS = {
-    FileStatus.CLASSIFIED: QColor("#66bb6a"),
-    FileStatus.ERROR: QColor("#ef5350"),
-}
-
 
 class FileExplorerWidget(QWidget):
-    # (list_name, index_in_that_list)
     file_selected = Signal(str, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -89,14 +83,17 @@ class FileExplorerWidget(QWidget):
         self._classified_list.blockSignals(True)
         self._classified_list.clear()
         for item in self._classified_items:
-            if item.class_entry:
-                label = f"[{item.class_entry.name}] {item.original_path.name}"
-            elif item.status == FileStatus.ERROR:
+            if item.is_error:
                 label = f"[error] {item.original_path.name}"
+                color = QColor("#ef5350")
+            elif item.class_name:
+                label = f"[{item.class_name}] {item.original_path.name}"
+                color = QColor("#66bb6a")
             else:
                 label = item.original_path.name
+                color = QColor("#cccccc")
             li = QListWidgetItem(label)
-            li.setForeground(STATUS_COLORS.get(item.status, QColor("#66bb6a")))
+            li.setForeground(color)
             self._classified_list.addItem(li)
         self._classified_list.blockSignals(False)
         self._classified_header.setText(f"Classified ({len(self._classified_items)})")
