@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.wayland.textinput=false")
 
 from PySide6.QtWidgets import QApplication
 

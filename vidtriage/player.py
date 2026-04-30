@@ -8,6 +8,8 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 
+from .theme import current_theme
+
 
 class CvPlayerWidget(QWidget):
     position_changed = Signal(float)
@@ -24,17 +26,15 @@ class CvPlayerWidget(QWidget):
 
         self._display = QLabel()
         self._display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._display.setStyleSheet("background: #1a1a1a;")
         self._display.setScaledContents(False)
         layout.addWidget(self._display)
 
         self._error_label = QLabel()
         self._error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._error_label.setStyleSheet(
-            "color: #ff6666; font-size: 16px; background: #1a1a1a;",
-        )
         self._error_label.hide()
         layout.addWidget(self._error_label)
+
+        self._apply_theme()
 
         self._cap: cv2.VideoCapture | None = None
         self._fps: float = 30.0
@@ -51,6 +51,14 @@ class CvPlayerWidget(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
+
+    def apply_theme(self) -> None:
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        t = current_theme()
+        self._display.setStyleSheet(t.player_style())
+        self._error_label.setStyleSheet(t.player_error_style())
 
     # ── configuration ──────────────────────────────────────
 

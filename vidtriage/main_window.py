@@ -12,6 +12,7 @@ from .models import ClassEntry
 from .session import Session
 from .player import CvPlayerWidget
 from .file_explorer import FileExplorerWidget
+from .theme import THEMES, current_theme, set_theme
 
 
 def _fmt_time(seconds: float) -> str:
@@ -27,6 +28,11 @@ class MainWindow(QMainWindow):
 
         self._session = session
 
+        self._zoom_factor: float = 1.0
+        self._base_font_size: int = QApplication.font().pointSize()
+        if self._base_font_size <= 0:
+            self._base_font_size = 10
+
         self._current_item = None
         self._current_list: str = "pending"
         self._current_row: int = -1
@@ -34,6 +40,7 @@ class MainWindow(QMainWindow):
         self._classified_n: int = 0
 
         self._build_ui()
+        QApplication.instance().setStyleSheet(current_theme().app_stylesheet())
         self._sync_explorer()
 
         QApplication.instance().installEventFilter(self)
@@ -159,6 +166,31 @@ class MainWindow(QMainWindow):
         act_fullscreen.triggered.connect(self._toggle_fullscreen)
 
         view_menu.addSeparator()
+        act_zoom_in = view_menu.addAction("Zoom In")
+        act_zoom_in.setShortcut(QKeySequence("Ctrl+="))
+        act_zoom_in.triggered.connect(lambda: self._zoom(0.1))
+        act_zoom_out = view_menu.addAction("Zoom Out")
+        act_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
+        act_zoom_out.triggered.connect(lambda: self._zoom(-0.1))
+        act_zoom_reset = view_menu.addAction("Reset Zoom")
+        act_zoom_reset.setShortcut(QKeySequence("Ctrl+0"))
+        act_zoom_reset.triggered.connect(self._zoom_reset)
+
+        view_menu.addSeparator()
+        theme_menu = view_menu.addMenu("Theme")
+        self._theme_group = QActionGroup(self)
+        for name in THEMES:
+            act = theme_menu.addAction(name)
+            act.setCheckable(True)
+            act.setData(name)
+            self._theme_group.addAction(act)
+            if name == current_theme().name:
+                act.setChecked(True)
+        self._theme_group.triggered.connect(
+            lambda a: self._switch_theme(a.data())
+        )
+
+        view_menu.addSeparator()
         view_menu.addAction("Summary", self._show_summary)
 
         # ── Playback ──
@@ -223,6 +255,28 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+
+    def _zoom(self, delta: float) -> None:
+        self._zoom_factor = max(0.5, min(self._zoom_factor + delta, 3.0))
+        self._apply_zoom()
+
+    def _zoom_reset(self) -> None:
+        self._zoom_factor = 1.0
+        self._apply_zoom()
+
+    def _apply_zoom(self) -> None:
+        font = QApplication.font()
+        font.setPointSize(int(self._base_font_size * self._zoom_factor))
+        QApplication.setFont(font)
+        for widget in QApplication.allWidgets():
+            widget.setFont(font)
+        self.statusBar().showMessage(f"Zoom: {int(self._zoom_factor * 100)}%", 2000)
+
+    def _switch_theme(self, name: str) -> None:
+        t = set_theme(name)
+        QApplication.instance().setStyleSheet(t.app_stylesheet())
+        self._player.apply_theme()
+        self._file_explorer.apply_theme()
 
     def _skip(self) -> None:
         pending = self._session.pending
@@ -677,6 +731,13 @@ class MainWindow(QMainWindow):
         key_event: QKeyEvent = event  # type: ignore[assignment]
         key = key_event.key()
         text = key_event.text()
+
+        if key == Qt.Key.Key_C and key_event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if self._current_item:
+                path = self._session.playback_path_of(self._current_item)
+                QApplication.clipboard().setText(str(path))
+                self.statusBar().showMessage(f"Copied: {path}", 3000)
+            return True
 
         if key == Qt.Key.Key_Tab:
             self._file_explorer.toggle_focus()

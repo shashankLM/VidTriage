@@ -7,9 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from .models import VideoItem
-
-FOCUSED_STYLE = "QListWidget { border: 2px solid #42a5f5; }"
-UNFOCUSED_STYLE = "QListWidget { border: 2px solid #444; }"
+from .theme import current_theme
 
 
 class FileExplorerWidget(QWidget):
@@ -29,10 +27,9 @@ class FileExplorerWidget(QWidget):
         pending_layout.setContentsMargins(0, 0, 0, 0)
         pending_layout.setSpacing(2)
         self._pending_header = QLabel("Pending (0)")
-        self._pending_header.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self._pending_header.setStyleSheet("font-weight: bold;")
         pending_layout.addWidget(self._pending_header)
         self._pending_list = QListWidget()
-        self._pending_list.setStyleSheet(FOCUSED_STYLE)
         self._pending_list.currentRowChanged.connect(self._on_pending_row_changed)
         self._pending_list.clicked.connect(lambda: self._set_focus("pending"))
         pending_layout.addWidget(self._pending_list)
@@ -44,10 +41,9 @@ class FileExplorerWidget(QWidget):
         classified_layout.setContentsMargins(0, 0, 0, 0)
         classified_layout.setSpacing(2)
         self._classified_header = QLabel("Classified (0)")
-        self._classified_header.setStyleSheet("font-weight: bold; font-size: 13px;")
+        self._classified_header.setStyleSheet("font-weight: bold;")
         classified_layout.addWidget(self._classified_header)
         self._classified_list = QListWidget()
-        self._classified_list.setStyleSheet(UNFOCUSED_STYLE)
         self._classified_list.currentRowChanged.connect(self._on_classified_row_changed)
         self._classified_list.clicked.connect(lambda: self._set_focus("classified"))
         classified_layout.addWidget(self._classified_list)
@@ -61,6 +57,18 @@ class FileExplorerWidget(QWidget):
         self._classified_items: list[VideoItem] = []
         self._active_list: str = "pending"
 
+        self._apply_theme()
+
+    def apply_theme(self) -> None:
+        self._apply_theme()
+        self._refresh()
+
+    def _apply_theme(self) -> None:
+        t = current_theme()
+        self._pending_list.setStyleSheet(t.focused_list_style())
+        self._classified_list.setStyleSheet(t.unfocused_list_style())
+        self._update_focus_style()
+
     def set_items(
         self,
         pending: list[VideoItem],
@@ -71,11 +79,13 @@ class FileExplorerWidget(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
+        t = current_theme()
+
         self._pending_list.blockSignals(True)
         self._pending_list.clear()
         for item in self._pending_items:
             li = QListWidgetItem(item.original_path.name)
-            li.setForeground(QColor("#cccccc"))
+            li.setForeground(QColor(t.pending_fg))
             self._pending_list.addItem(li)
         self._pending_list.blockSignals(False)
         self._pending_header.setText(f"Pending ({len(self._pending_items)})")
@@ -85,13 +95,13 @@ class FileExplorerWidget(QWidget):
         for item in self._classified_items:
             if item.is_error:
                 label = f"[error] {item.original_path.name}"
-                color = QColor("#ef5350")
+                color = QColor(t.error_item_fg)
             elif item.class_name:
                 label = f"[{item.class_name}] {item.original_path.name}"
-                color = QColor("#66bb6a")
+                color = QColor(t.classified_fg)
             else:
                 label = item.original_path.name
-                color = QColor("#cccccc")
+                color = QColor(t.pending_fg)
             li = QListWidgetItem(label)
             li.setForeground(color)
             self._classified_list.addItem(li)
@@ -117,12 +127,13 @@ class FileExplorerWidget(QWidget):
         self._update_focus_style()
 
     def _update_focus_style(self) -> None:
+        t = current_theme()
         if self._active_list == "pending":
-            self._pending_list.setStyleSheet(FOCUSED_STYLE)
-            self._classified_list.setStyleSheet(UNFOCUSED_STYLE)
+            self._pending_list.setStyleSheet(t.focused_list_style())
+            self._classified_list.setStyleSheet(t.unfocused_list_style())
         else:
-            self._pending_list.setStyleSheet(UNFOCUSED_STYLE)
-            self._classified_list.setStyleSheet(FOCUSED_STYLE)
+            self._pending_list.setStyleSheet(t.unfocused_list_style())
+            self._classified_list.setStyleSheet(t.focused_list_style())
 
     def _on_pending_row_changed(self, row: int) -> None:
         if row >= 0:

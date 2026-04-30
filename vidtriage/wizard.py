@@ -63,7 +63,8 @@ class SetupWizard(QDialog):
 
         self._info_label = QLabel("")
         self._info_label.setWordWrap(True)
-        self._info_label.setStyleSheet("color: #aaa; font-size: 12px; padding: 4px 0;")
+        from .theme import current_theme
+        self._info_label.setStyleSheet(f"color: {current_theme().info_fg}; font-size: 12px; padding: 4px 0;")
         layout.addWidget(self._info_label)
 
         layout.addSpacing(8)

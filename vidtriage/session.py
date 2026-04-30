@@ -70,12 +70,19 @@ class Session:
     @property
     def pending(self) -> list[VideoItem]:
         """Videos not yet classified (or undone back to pending)."""
-        return [v for v in self._videos.values() if v.is_pending]
+        return sorted(
+            (v for v in self._videos.values() if v.is_pending),
+            key=lambda v: v.original_path.name.lower(),
+        )
 
     @property
     def classified(self) -> list[VideoItem]:
         """Videos that have a current classification (including errors)."""
-        return [v for v in self._videos.values() if not v.is_pending]
+        return sorted(
+            (v for v in self._videos.values() if not v.is_pending),
+            key=lambda v: v.original_path.name.lower(),
+            reverse=True,
+        )
 
     @property
     def all_videos(self) -> list[VideoItem]:
