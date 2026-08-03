@@ -39,8 +39,9 @@ class VideoItem:
         ["cat", None]         classified, then undone → pending
         ["cat", None, "dog"]  cat → undo → dog
 
-    The on-disk location is derived, not stored: filenames are checked for
-    uniqueness at load, so ``output_dir / class_name / filename`` is enough.
+    The file itself never moves. ``original_path`` is where it is, for the whole
+    life of the session; the class is a fact recorded in the log, and
+    :meth:`snapshot_path` is only consulted when the user asks for a copy.
     """
 
     original_path: Path
@@ -68,17 +69,11 @@ class VideoItem:
     def is_error(self) -> bool:
         return self.class_name == ERRORS_FOLDER
 
-    def destination_path(self, output_dir: Path) -> Path | None:
+    def snapshot_path(self, output_dir: Path) -> Path | None:
+        """Where a snapshot would place this video. ``None`` while pending."""
         if self.is_pending:
             return None
         return output_dir / str(self.class_name) / self.original_path.name
-
-    def playback_path(self, output_dir: Path) -> Path:
-        """Where the file actually is: its class folder if present, else its origin."""
-        destination = self.destination_path(output_dir)
-        if destination is not None and destination.exists():
-            return destination
-        return self.original_path
 
 
 @dataclass

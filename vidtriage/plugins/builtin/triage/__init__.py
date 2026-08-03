@@ -1,12 +1,25 @@
 """Whole-video triage — the original VidTriage workflow, as a plugin.
 
-Press a number key, the video moves into that class folder, the next one loads.
-Behaviour is unchanged from before the restructure; what changed is that it now
-lives behind the same extension API as everything else. It contributes commands,
-a panel and an exporter, and can be switched off in View ▸ Plugins — leaving a
-plain frame-annotation tool with no trace of classification in the UI.
+Press a number key, the decision is logged, the next video loads. It contributes
+commands, a panel and an exporter, and can be switched off in View ▸ Plugins —
+leaving a plain frame-annotation tool with no trace of classification in the UI.
 
 If the built-in workflow can be expressed this way, so can yours.
+
+**Your files are never moved.** Classification appends a line to a log; the
+input tree is read-only. See :mod:`ledger` for the record format and overlay
+rules, and :mod:`snapshot` for turning a log back into folders of video.
+
+Three things follow from that, and they are the point of the design:
+
+* A mis-key costs a keystroke, not a file operation. Undo appends a correcting
+  record instead of moving footage back.
+* Classifying is instant. The old implementation had to flush annotations and
+  stop the decoder before every keypress so the file could be moved out from
+  under it; nothing holds a lock on a file that stays put.
+* Two passes over the same corpus can disagree. Each run writes its own log, and
+  they are replayed oldest-first with later winning, so a second pass corrects a
+  first without either being rewritten.
 
 **One keybinding moved.** ``Ctrl+Z`` now undoes an *annotation* edit, because
 there are two independent histories and annotation edits are far more frequent.
@@ -30,6 +43,7 @@ from .config import load_last_session, parse_classes
 from .explorer import CLASSIFIED, PENDING, FileExplorerWidget
 from .models import MAX_CLASSES, ClassEntry, TriageConfig, VideoItem
 from .session import Session
+from .snapshot import plan_snapshot, write_snapshot
 from .wizard import SetupWizard
 
 __all__ = ["PLUGIN", "TriagePlugin"]
@@ -68,7 +82,12 @@ class TriagePlugin(Plugin):
 
         last = load_last_session()
         if last.is_complete and last.input_dir and last.input_dir.is_dir():
-            self._start_session(Session(last.input_dir, last.output_dir, last.classes))
+            self._start_session(
+                Session(
+                    last.input_dir, last.output_dir, last.classes,
+                    logs=ctx.app.launch_options.get("triage_logs"),
+                ),
+            )
         else:
             ctx.app.status("Triage: use File ▸ Triage Session… to pick directories", 8000)
 
@@ -126,6 +145,12 @@ class TriagePlugin(Plugin):
             order=40, handler=self._export_classifications,
             is_enabled=lambda: self.session is not None,
             description="CSV of every video and the class it was filed under",
+        )
+        ctx.add_command(
+            id="triage.snapshot", title="Snapshot To Class Folders…", shortcut="Ctrl+Shift+E",
+            menu="File", section="1", order=50, handler=self._write_snapshot,
+            is_enabled=lambda: bool(self.session and self.session.classified),
+            description="Copy every classified video into <outdir>/<class>/",
         )
 
     def _sync_class_commands(self) -> None:
@@ -191,34 +216,28 @@ class TriagePlugin(Plugin):
         if wizard.exec() != QDialog.DialogCode.Accepted or wizard.result_config is None:
             return
         config: TriageConfig = wizard.result_config
-        self._start_session(Session(config.input_dir, config.output_dir, config.classes))
+        self._start_session(
+            Session(
+                config.input_dir, config.output_dir, config.classes,
+                logs=wizard.result_logs,
+            ),
+        )
 
     def _start_session(self, session: Session) -> None:
         ctx = self._ctx
         if ctx is None:
             return
 
-        attach_file_log(session.output_dir)
+        attach_file_log(session.log_dir)
         session.load()
         self.session = session
         self._sync_class_commands()
-
-        duplicates = session.find_duplicate_names()
-        if duplicates:
-            listing = "\n".join(
-                f"• {name} ({len(paths)}×)" for name, paths in list(duplicates.items())[:10]
-            )
-            QMessageBox.warning(
-                ctx.app.window, "Duplicate filenames",
-                "These filenames appear more than once. Because a video's "
-                "destination is derived from its name, classifying them would "
-                "collide — the second move will be refused rather than "
-                "overwrite the first.\n\n" + listing,
-            )
-
         self._sync_library(prefer_first_pending=True)
+
+        overlaid = f" · {len(session.logs)} log(s) replayed" if session.logs else ""
         ctx.app.status(
-            f"Triage: {len(session.pending)} pending, {len(session.classified)} classified",
+            f"Triage: {len(session.pending)} pending, "
+            f"{len(session.classified)} classified{overlaid}",
             6000,
         )
 
@@ -231,7 +250,7 @@ class TriagePlugin(Plugin):
             return
 
         self._order = [*self.session.pending, *self.session.classified]
-        paths = [self.session.playback_path_of(item) for item in self._order]
+        paths = [item.original_path for item in self._order]
 
         self._suppress_library_sync = True
         try:
@@ -302,15 +321,7 @@ class TriagePlugin(Plugin):
             return
 
         was_pending = item.is_pending
-        if not self._release_current_file():
-            return
-        try:
-            self.session.classify(item, entry)
-        except VidTriageError as exc:
-            QMessageBox.warning(ctx.app.window, "Cannot classify", str(exc))
-            self._sync_library()
-            return
-
+        self.session.classify(item, entry)
         ctx.app.status(f"{item.name} → {entry.name}", 2500)
         self._sync_library()
         if was_pending:
@@ -322,15 +333,7 @@ class TriagePlugin(Plugin):
         if item is None or ctx is None or self.session is None or item.is_error:
             return
 
-        if not self._release_current_file():
-            return
-        try:
-            self.session.mark_error(item)
-        except VidTriageError as exc:
-            QMessageBox.warning(ctx.app.window, "Cannot move file", str(exc))
-            self._sync_library()
-            return
-
+        self.session.mark_error(item)
         ctx.app.status(f"{item.name} → _errors", 2500)
         self._sync_library()
         self._go_to_next_pending()
@@ -339,15 +342,8 @@ class TriagePlugin(Plugin):
         ctx = self._ctx
         if ctx is None or self.session is None:
             return
-        if not self._release_current_file():
-            return
-        try:
-            item = self.session.undo_last()
-        except VidTriageError as exc:
-            QMessageBox.warning(ctx.app.window, "Cannot undo", str(exc))
-            self._sync_library()
-            return
 
+        item = self.session.undo_last()
         self._sync_library()
         if item is None:
             ctx.app.status("Nothing to undo", 2000)
@@ -356,19 +352,6 @@ class TriagePlugin(Plugin):
         if item in self._order:
             ctx.app.library.set_index(self._order.index(item))
         ctx.app.status(f"Undid: {item.name}", 2500)
-
-    def _release_current_file(self) -> bool:
-        """Flush annotations and close the decoder before touching the file.
-
-        Saving first matters: the sidecar has to be written next to the video
-        *before* the move, so :func:`io_ops.move_media` can carry it along.
-        """
-        ctx = self._ctx
-        if ctx is None:
-            return False
-        ctx.app.flush_annotations()
-        ctx.app.playback.close_and_wait()
-        return True
 
     def _skip(self) -> None:
         self._go_to_next_pending()
@@ -480,11 +463,7 @@ class TriagePlugin(Plugin):
             return
 
         rows = [
-            (
-                item.name,
-                item.class_name or "unclassified",
-                str(self.session.playback_path_of(item)),
-            )
+            (item.name, item.class_name or "unclassified", str(item.original_path))
             for item in [*self.session.pending, *self.session.classified]
         ]
         try:
@@ -496,6 +475,61 @@ class TriagePlugin(Plugin):
             QMessageBox.warning(ctx.app.window, "Export failed", str(exc))
             return
         ctx.app.status(f"Exported {len(rows)} row(s) to {Path(path).name}", 6000)
+
+    def _write_snapshot(self) -> None:
+        """Copy the log's verdict out as folders of video."""
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return
+
+        chosen = QFileDialog.getExistingDirectory(
+            ctx.app.window, "Snapshot into a new, empty directory",
+            str(self.session.output_dir),
+        )
+        if not chosen:
+            return
+
+        target = Path(chosen)
+        items = self.session.classified
+        plan = plan_snapshot(items, target)
+        if plan.collisions:
+            QMessageBox.warning(
+                ctx.app.window, "Duplicate filenames",
+                f"{len(plan.collisions)} filename(s) appear more than once, so a "
+                f"snapshot cannot name them apart. Nothing was written.\n\n"
+                + "\n".join(Path(d).name for d in list(plan.collisions)[:10]),
+            )
+            return
+
+        link = QMessageBox.question(
+            ctx.app.window, "Hardlink instead of copying?",
+            f"Snapshot {len(plan.pairs)} video(s) into\n{target}\n\n"
+            f"Hardlinking is instant and uses no extra disk, but only works on "
+            f"the same filesystem — it falls back to copying per file.\n\n"
+            f"Yes to hardlink, No to copy.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+        )
+        if link == QMessageBox.StandardButton.Cancel:
+            return
+
+        try:
+            result = write_snapshot(
+                items, target, link=link == QMessageBox.StandardButton.Yes,
+            )
+        except VidTriageError as exc:
+            QMessageBox.warning(ctx.app.window, "Snapshot failed", str(exc))
+            return
+
+        if result.warnings:
+            show_html(
+                ctx.app.window, "Snapshot warnings",
+                f"<h3>{result.summary()}</h3><ul>"
+                + "".join(f"<li>{warning}</li>" for warning in result.warnings)
+                + "</ul>",
+                (560, 380),
+            )
+        ctx.app.status(result.summary(), 8000)
 
 
 PLUGIN = TriagePlugin

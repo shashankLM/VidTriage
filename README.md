@@ -34,23 +34,56 @@ curl -LO https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 
 ## The three things it does
 
-### 1. Triage — file whole videos into folders
+### 1. Triage — decide what every video is
 
-Press a number key; the video moves into that class's folder and the next one
-loads. `U` undoes, `X` files to `_errors/`, `S` skips.
+Press a number key; the decision is recorded and the next video loads. `U`
+undoes, `X` files to `_errors`, `S` skips.
 
-```
-  Input directory              Output directory
-  ┌──────────────┐             ┌──────────────────────┐
-  │ video_01.mp4 │  ──[1]──>   │ cat/video_01.mp4     │
-  │ video_02.mp4 │  ──[2]──>   │ dog/video_02.mp4     │
-  │ video_03.mp4 │  ──[x]──>   │ _errors/video_03.mp4 │
-  └──────────────┘             └──────────────────────┘
+**Your files never move.** A decision is one line appended to a log:
+
+```jsonc
+{"v":1, "at":"2026-07-31T18:20:05Z", "file":"video_01.mp4", "class":"cat"}
+{"v":1, "at":"2026-07-31T18:20:11Z", "file":"video_02.mp4", "class":null}  // undo
 ```
 
-Files are **moved**, not copied. Relaunch and previously classified videos are
-picked back up from the output folders. If a move would overwrite an existing
-file it is refused and reported — nothing is ever silently replaced.
+State is a fold over those records — **the last decision for a file wins** — so
+undo is a correcting record rather than a rewrite, and the log is only ever
+appended to.
+
+**Each run writes its own log, and logs stack.** Replay them oldest-first and a
+later pass overrides an earlier one, so a second opinion never destroys the
+first and dropping a log from the stack cleanly un-applies it:
+
+```console
+$ vidtriage                                  # replays every log for this corpus
+$ vidtriage --log pass1.jsonl --log pass2.jsonl   # explicit stack, last wins
+```
+
+The setup dialog (`Ctrl+T`) lists the discovered logs with their decision counts
+and time spans, and lets you reorder or remove them. Logs live in
+`~/.vidtriage/logs/<corpus>/` — outside both the input and output trees.
+
+**Snapshot when you want folders.** `File ▸ Snapshot To Class Folders…`, or
+headless:
+
+```console
+$ vidtriage --snapshot ./deliverable --link
+```
+
+```
+  Input directory (read-only)      Snapshot
+  ┌──────────────┐                 ┌──────────────────────┐
+  │ video_01.mp4 │  ───[log]───>   │ cat/video_01.mp4     │
+  │ video_02.mp4 │                 │ dog/video_02.mp4     │
+  │ video_03.mp4 │                 │ _errors/video_03.mp4 │
+  └──────────────┘                 └──────────────────────┘
+```
+
+Sources are copied, never moved. `--link` hardlinks instead — instant and free
+on the same filesystem, falling back to a copy per file when it can't. The
+target must be new or empty, and duplicate filenames abort the whole snapshot
+before a byte is written; a half-built deliverable that looks complete is worse
+than none.
 
 ### 2. Annotate — draw on frames
 
@@ -59,7 +92,7 @@ that exact frame. Select with `V`, drag to move, grab a handle to resize,
 `Del` to remove, `Ctrl+Z` to undo.
 
 Annotations are stored in a `<video>.vidtriage.json` sidecar next to the media,
-written atomically. The sidecar travels with the video when triage moves it.
+written atomically. The sidecar is copied alongside its video into a snapshot.
 
 ### 3. Model-assisted — point at a thing, get an annotation
 
@@ -187,7 +220,7 @@ it is always current. The main ones:
 | Key | Action |
 |---|---|
 | `1`–`9` | Classify with that class (triage) |
-| `U` / `X` / `S` | Undo classification · move to `_errors` · skip |
+| `U` / `X` / `S` | Undo classification · file to `_errors` · skip |
 | `Space` · `←` `→` · `↑` `↓` | Play/pause · step frame · previous/next file |
 | `V` `H` `B` `P` `G` | Select · pan · box · point · polygon |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo an annotation edit |
@@ -259,8 +292,10 @@ drop-in plugins — both useful for isolating a misbehaving extension.
 Plugin, decode and layer-paint faults are contained rather than fatal, so the
 report that replaces the crash is the only thing you get: run with `-v` to add
 local variables to those tracebacks. Console output uses `rich` when it is
-installed and falls back to plain text when it is not; the rotating log in the
-session output directory is always plain.
+installed and falls back to plain text when it is not; the rotating activity log
+in the session's log directory is always plain.
 
 Config lives in `~/.vidtriage/`: `settings.json`, `sessions.json`,
-`plugins.json`, `weights/`, `plugins/`.
+`plugins.json`, `weights/`, `plugins/`, and `logs/<corpus>/` — the triage
+decision logs, which are the only record of what you classified. Back those up;
+everything else is reproducible.

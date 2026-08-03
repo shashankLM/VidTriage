@@ -1,9 +1,15 @@
-"""Setup dialog: pick the directories and the class list.
+"""Setup dialog: pick the directories, the class list, and the log stack.
 
 Validation is the substance here. Input and output must exist, be readable and
-writable, and must not overlap in either direction — an output folder nested
-inside the input would be rescanned as source material on the next launch, and
-the session would eat its own results.
+writable, and must not overlap in either direction — a snapshot written inside
+the input directory would be rescanned as source material on the next launch,
+and the session would eat its own results.
+
+The log stack is the other half. Every run appends its decisions to a new log,
+so a corpus accumulates one per pass; the list here chooses which of them apply
+and in what order. Order is the whole meaning of the list — it is replayed top
+to bottom and the last decision for a file wins, so moving a log down makes it
+override the ones above it.
 """
 
 from __future__ import annotations
@@ -22,6 +28,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -35,6 +43,7 @@ from ....core.logging import get_logger
 from ....view.theme import current_theme
 from .config import load_all_sessions, parse_classes, save_session
 from .io_ops import discover_videos, scan_output_subfolders
+from .ledger import LOG_SUFFIX, default_log_dir, discover_logs, summarise
 from .models import ERRORS_FOLDER, TriageConfig
 
 __all__ = ["SetupWizard"]
@@ -56,11 +65,14 @@ class SetupWizard(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("VidTriage — Setup")
-        self.setMinimumSize(560, 560)
+        self.setMinimumSize(560, 700)
         self.result_config: TriageConfig | None = None
+        #: Logs to replay, in override order. ``None`` means auto-discover.
+        self.result_logs: list[Path] | None = None
 
         self._sessions = load_all_sessions()
         self._last_output_text = ""
+        self._last_input_text = ""
 
         layout = QVBoxLayout(self)
 
@@ -88,6 +100,9 @@ class SetupWizard(QDialog):
         layout.addSpacing(8)
         layout.addWidget(QLabel("Classes — one per line, keys assigned 1-9:"))
         self._build_class_widgets(layout)
+
+        layout.addSpacing(8)
+        self._build_log_widgets(layout)
 
         layout.addStretch()
 
@@ -143,6 +158,80 @@ class SetupWizard(QDialog):
         self._class_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._class_table.setMaximumHeight(150)
         layout.addWidget(self._class_table)
+
+    def _build_log_widgets(self, layout: QVBoxLayout) -> None:
+        layout.addWidget(QLabel("Logs to replay — applied top to bottom, last one wins:"))
+
+        row = QHBoxLayout()
+        self._log_list = QListWidget()
+        self._log_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._log_list.setMaximumHeight(120)
+        row.addWidget(self._log_list, stretch=1)
+
+        buttons = QVBoxLayout()
+        for label, slot in (
+            ("▲", lambda: self._move_log(-1)),
+            ("▼", lambda: self._move_log(1)),
+            ("Add…", self._add_log),
+            ("Remove", self._remove_log),
+        ):
+            button = QPushButton(label)
+            button.setMaximumWidth(80)
+            button.clicked.connect(slot)
+            buttons.addWidget(button)
+        buttons.addStretch()
+        row.addLayout(buttons)
+        layout.addLayout(row)
+
+        self._log_hint = QLabel("")
+        self._log_hint.setWordWrap(True)
+        self._log_hint.setStyleSheet(
+            f"color: {current_theme().info_fg}; font-size: 11px; padding: 2px 0;",
+        )
+        layout.addWidget(self._log_hint)
+
+    def _refresh_log_list(self, input_dir: Path) -> None:
+        """Reload the discovered stack for a corpus, oldest first."""
+        self._log_list.clear()
+        logs = discover_logs(default_log_dir(input_dir))
+        for path in logs:
+            self._log_list.addItem(_log_item(path))
+        self._log_hint.setText(
+            f"{len(logs)} previous run(s) in {default_log_dir(input_dir)}. "
+            "This session appends to a new log of its own."
+            if logs else
+            "No previous runs for this input directory — this session starts a first log.",
+        )
+
+    def _selected_logs(self) -> list[Path]:
+        return [
+            Path(self._log_list.item(i).data(Qt.ItemDataRole.UserRole))
+            for i in range(self._log_list.count())
+        ]
+
+    def _move_log(self, delta: int) -> None:
+        row = self._log_list.currentRow()
+        target = row + delta
+        if row < 0 or not 0 <= target < self._log_list.count():
+            return
+        item = self._log_list.takeItem(row)
+        self._log_list.insertItem(target, item)
+        self._log_list.setCurrentRow(target)
+
+    def _add_log(self) -> None:
+        start = self._input_edit.text().strip() or str(Path.home())
+        chosen, _filter = QFileDialog.getOpenFileNames(
+            self, "Add triage logs", start, f"Triage logs (*{LOG_SUFFIX});;All files (*)",
+        )
+        existing = {str(p) for p in self._selected_logs()}
+        for path in chosen:
+            if path not in existing:
+                self._log_list.addItem(_log_item(Path(path)))
+
+    def _remove_log(self) -> None:
+        row = self._log_list.currentRow()
+        if row >= 0:
+            self._log_list.takeItem(row)
 
     def _select_initial_session(
         self, prefill_input: Path | None, prefill_output: Path | None,
@@ -214,6 +303,9 @@ class SetupWizard(QDialog):
 
         if input_text and Path(input_text).is_dir():
             parts.append(f"Input: {len(discover_videos(Path(input_text)))} videos")
+            if input_text != self._last_input_text:
+                self._last_input_text = input_text
+                self._refresh_log_list(Path(input_text))
 
         if output_text and Path(output_text).is_dir():
             counts: list[tuple[str, int]] = []
@@ -279,8 +371,8 @@ class SetupWizard(QDialog):
             errors.append("Input and output directories must be different.")
         elif output_dir.is_relative_to(input_dir):
             errors.append(
-                "Output cannot be inside the input directory — classified videos "
-                "would be rediscovered as source material on the next launch.",
+                "Output cannot be inside the input directory — a snapshot written "
+                "there would be rediscovered as source material on the next launch.",
             )
         elif input_dir.is_relative_to(output_dir):
             errors.append("Input directory cannot be inside the output directory.")
@@ -305,7 +397,18 @@ class SetupWizard(QDialog):
         config = TriageConfig(input_dir=input_dir, output_dir=output_dir, classes=entries)
         save_session(config)
         self.result_config = config
+        self.result_logs = self._selected_logs()
         self.accept()
+
+
+def _log_item(path: Path) -> QListWidgetItem:
+    """One row: the log's name, how many decisions it holds, and when."""
+    count, first, last = summarise(path)
+    span = f"{first[:16]} → {last[:16]}" if first else "empty"
+    item = QListWidgetItem(f"{path.name}   ({count} decision(s), {span})")
+    item.setData(Qt.ItemDataRole.UserRole, str(path))
+    item.setToolTip(str(path))
+    return item
 
 
 def _session_label(config: TriageConfig) -> str:

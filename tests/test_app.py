@@ -14,7 +14,6 @@ import pytest
 from vidtriage.app.context import AppContext
 from vidtriage.app.window import MainWindow
 from vidtriage.core.annotations import MANUAL_SOURCE, Annotation
-from vidtriage.core.errors import FileOperationError
 from vidtriage.core.geometry import Point, Rect
 from vidtriage.persistence.settings import Settings
 from vidtriage.persistence.sidecar import load_annotations, sidecar_path_for
@@ -384,23 +383,42 @@ class TestTriageWorkflow:
         assert shortcuts["2"].title.endswith("dog")
         assert "New class" in shortcuts["3"].title
 
-    def test_classifying_moves_the_file_and_advances(self, triage, pump):
+    def test_classifying_touches_no_file_and_advances(self, triage, pump):
+        """The whole point: a decision is a log line, not a move."""
         from vidtriage.plugins.builtin.triage.models import ClassEntry
 
         _context, plugin, source, output = triage
         first = plugin.current_item
+        before = sorted(p.name for p in source.iterdir())
+
         plugin._classify(ClassEntry("1", "cat"))
         pump(700)
 
-        assert (output / "cat" / first.name).exists()
-        assert not (source / first.name).exists()
+        assert sorted(p.name for p in source.iterdir()) == before
+        assert not (output / "cat").exists()
+        assert first.class_name == "cat"
         assert len(plugin.session.pending) == 2
         assert plugin.current_item is not first
 
-    def test_undo_puts_the_file_back(self, triage, pump):
+    def test_the_decision_lands_in_the_log(self, triage, pump):
+        from vidtriage.plugins.builtin.triage.ledger import read_log
         from vidtriage.plugins.builtin.triage.models import ClassEntry
 
-        _context, plugin, source, output = triage
+        _context, plugin, _source, _output = triage
+        first = plugin.current_item
+        plugin._classify(ClassEntry("1", "cat"))
+        pump(600)
+
+        decisions = read_log(plugin.session.log_path)
+        assert [(d.file, d.class_name) for d in decisions] == [(first.name, "cat")]
+        assert decisions[0].at, "a decision with no timestamp is unreadable later"
+
+    def test_undo_appends_a_correction_rather_than_rewriting(self, triage, pump):
+        """Append-only is what lets a concurrent reader trust the file."""
+        from vidtriage.plugins.builtin.triage.ledger import read_log
+        from vidtriage.plugins.builtin.triage.models import ClassEntry
+
+        _context, plugin, source, _output = triage
         first = plugin.current_item
         plugin._classify(ClassEntry("1", "cat"))
         pump(600)
@@ -408,31 +426,14 @@ class TestTriageWorkflow:
         pump(600)
 
         assert (source / first.name).exists()
-        assert not (output / "cat" / first.name).exists()
         assert len(plugin.session.pending) == 3
+        assert [d.class_name for d in read_log(plugin.session.log_path)] == ["cat", None]
 
-    def test_annotations_travel_with_a_classified_video(self, triage, pump):
-        """A sidecar left behind would orphan every label on the clip."""
+    def test_reclassifying_is_just_a_later_record(self, triage, pump):
+        from vidtriage.plugins.builtin.triage.ledger import read_log, replay
         from vidtriage.plugins.builtin.triage.models import ClassEntry
 
-        context, plugin, source, output = triage
-        item = plugin.current_item
-        context.annotations.add(
-            Annotation(context.current_frame.ref, Rect(1, 1, 9, 9), label="sticky"),
-        )
-        plugin._classify(ClassEntry("2", "dog"))
-        pump(700)
-
-        moved = output / "dog" / item.name
-        assert moved.exists()
-        assert not sidecar_path_for(source / item.name).exists()
-        assert sidecar_path_for(moved).exists()
-        assert load_annotations(moved)[0].label == "sticky"
-
-    def test_reclassifying_moves_between_class_folders(self, triage, pump):
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
-
-        context, plugin, _source, output = triage
+        context, plugin, _source, _output = triage
         item = plugin.current_item
         plugin._classify(ClassEntry("1", "cat"))
         pump(600)
@@ -442,29 +443,55 @@ class TestTriageWorkflow:
         plugin._classify(ClassEntry("2", "dog"))
         pump(600)
 
-        assert (output / "dog" / item.name).exists()
-        assert not (output / "cat" / item.name).exists()
+        assert item.class_name == "dog"
+        assert [d.class_name for d in read_log(plugin.session.log_path)] == ["cat", "dog"]
+        assert replay([plugin.session.log_path])[item.name] == "dog"
 
     def test_mark_error(self, triage, pump):
         _context, plugin, _source, output = triage
         item = plugin.current_item
         plugin._mark_error()
         pump(700)
-        assert (output / "_errors" / item.name).exists()
 
-    def test_a_collision_is_refused_not_silently_overwritten(self, triage, pump):
-        """Overwriting the user's footage is the one unrecoverable outcome."""
+        assert item.class_name == "_errors"
+        assert not (output / "_errors").exists()
+
+    def test_a_snapshot_copies_without_disturbing_the_source(self, triage, pump, tmp_path):
         from vidtriage.plugins.builtin.triage.models import ClassEntry
+        from vidtriage.plugins.builtin.triage.snapshot import write_snapshot
 
-        _context, plugin, _source, output = triage
+        _context, plugin, source, _output = triage
         item = plugin.current_item
-        blocker = output / "cat" / item.name
-        blocker.parent.mkdir(parents=True, exist_ok=True)
-        blocker.write_bytes(b"pre-existing and precious")
+        plugin._classify(ClassEntry("1", "cat"))
+        pump(600)
 
-        with pytest.raises(FileOperationError):
-            plugin.session.classify(item, ClassEntry("1", "cat"))
-        assert blocker.read_bytes() == b"pre-existing and precious"
+        target = tmp_path / "snap"
+        result = write_snapshot(plugin.session.classified, target)
+
+        assert result.written == 1
+        assert (target / "cat" / item.name).exists()
+        assert (source / item.name).exists(), "the source must survive a snapshot"
+
+    def test_annotations_travel_into_the_snapshot(self, triage, pump, tmp_path):
+        """A sidecar left behind would orphan every label on the clip."""
+        from vidtriage.plugins.builtin.triage.models import ClassEntry
+        from vidtriage.plugins.builtin.triage.snapshot import write_snapshot
+
+        context, plugin, source, _output = triage
+        item = plugin.current_item
+        context.annotations.add(
+            Annotation(context.current_frame.ref, Rect(1, 1, 9, 9), label="sticky"),
+        )
+        plugin._classify(ClassEntry("2", "dog"))
+        pump(700)
+        context.flush_annotations()
+
+        target = tmp_path / "snap"
+        write_snapshot(plugin.session.classified, target)
+
+        copied = target / "dog" / item.name
+        assert sidecar_path_for(source / item.name).exists(), "the original keeps its labels"
+        assert load_annotations(copied)[0].label == "sticky"
 
     def test_a_reopened_session_recovers_prior_classifications(self, triage, pump):
         from vidtriage.plugins.builtin.triage.models import ClassEntry
@@ -478,10 +505,11 @@ class TestTriageWorkflow:
         reopened.load()
         assert len(reopened.classified) == 1
         assert reopened.classified[0].class_name == "cat"
-        # The class list is rebuilt from the folders that exist.
+        # The class list is rebuilt from what the replayed logs mention.
         assert any(c.name == "cat" for c in reopened.classes)
+        assert reopened.log_path != plugin.session.log_path, "a rerun is its own pass"
 
-    def test_duplicate_filenames_are_detected_before_any_move(self, tmp_path, sample_video):
+    def test_duplicate_filenames_are_detected(self, tmp_path, sample_video):
         from vidtriage.plugins.builtin.triage.session import Session
 
         source = tmp_path / "dupes"

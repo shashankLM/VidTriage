@@ -62,6 +62,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Output directory for a triage session",
     )
     parser.add_argument(
+        "--log", dest="logs", action="append", type=Path, metavar="PATH",
+        help="Triage log to replay; repeat to stack them. Applied in the order "
+             "given, last one wins. Omit to replay every log recorded for the "
+             "input directory",
+    )
+    parser.add_argument(
+        "--snapshot", dest="snapshot_dir", type=Path, default=None, metavar="DIR",
+        help="Copy every classified video into DIR/<class>/ and exit. DIR must "
+             "be new or empty",
+    )
+    parser.add_argument(
+        "--link", action="store_true",
+        help="Hardlink instead of copying during --snapshot, falling back to a "
+             "copy per file when that is not possible",
+    )
+    parser.add_argument(
         "--no-plugins", action="store_true",
         help="Start with only the shell — useful for isolating a misbehaving plugin",
     )
@@ -94,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(level=logging.INFO, verbose=args.verbose)
     _log.info("VidTriage %s starting", __version__)
 
+    if args.snapshot_dir is not None:
+        # Headless: build the deliverable from the logs and exit, so a rerun can
+        # be scripted without a display.
+        return snapshot_only(args)
+
     app = QApplication(sys.argv)
     app.setApplicationName("VidTriage")
     app.setApplicationVersion(__version__)
@@ -101,7 +122,11 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     manager = PluginManager(state_file=CONFIG_DIR / "plugins.json")
-    context = AppContext(settings=settings, plugin_manager=manager)
+    context = AppContext(
+        settings=settings,
+        plugin_manager=manager,
+        launch_options={"triage_logs": args.logs},
+    )
 
     window = MainWindow(context)
 
@@ -123,6 +148,41 @@ def main(argv: list[str] | None = None) -> int:
 
     window.show()
     return app.exec()
+
+
+def snapshot_only(args: argparse.Namespace) -> int:
+    """Build a snapshot from the logs and exit. No Qt, no window.
+
+    Deliberately does not append to a log or create one: a snapshot is a read of
+    the decisions, so running it must not become a pass of its own.
+    """
+    from .core.errors import VidTriageError
+    from .plugins.builtin.triage.config import load_last_session
+    from .plugins.builtin.triage.session import Session
+    from .plugins.builtin.triage.snapshot import write_snapshot
+
+    config = load_last_session()
+    input_dir = args.input_dir or config.input_dir
+    if input_dir is None or not Path(input_dir).is_dir():
+        _log.error("No input directory — pass -i, or run the app once to set one up")
+        return 2
+
+    session = Session(
+        input_dir, args.output_dir or config.output_dir or input_dir,
+        config.classes, logs=args.logs, record=False,
+    )
+    session.load()
+
+    try:
+        result = write_snapshot(session.classified, args.snapshot_dir, link=args.link)
+    except VidTriageError as exc:
+        _log.error("%s", exc)
+        return 1
+
+    for warning in result.warnings:
+        _log.warning("%s", warning)
+    _log.info("%s", result.summary())
+    return 0
 
 
 if __name__ == "__main__":

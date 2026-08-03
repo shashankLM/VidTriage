@@ -1,16 +1,17 @@
-"""File operations for triage.
+"""Filesystem operations for triage: finding videos, and copying them out.
 
-Two behaviours here are deliberate departures from the previous implementation,
-both because they concern the user's actual video files:
+**Nothing here moves a file.** Classification is recorded in a log (see
+:mod:`ledger`), so the input tree is read-only for the whole session and the
+only write path is :func:`copy_media`, which materialises a snapshot into a
+directory the user names.
 
-**Collisions are refused, never overwritten.** ``shutil.move`` onto an existing
-path replaces it. If two different videos ever resolve to the same destination,
-the old code destroyed one of them silently. Here that raises
-:class:`~vidtriage.core.errors.FileOperationError` naming both paths, and the UI
-reports it. Refusing an operation is recoverable; deleting footage is not.
+**Collisions are refused, never overwritten.** If two videos ever resolve to the
+same destination, the earlier implementation destroyed one of them silently.
+Here that raises :class:`~vidtriage.core.errors.FileOperationError` naming both
+paths. Refusing an operation is recoverable; deleting footage is not.
 
-**Annotation sidecars travel with the video.** Triage moves files between class
-folders; a sidecar left behind would orphan every annotation on that clip.
+**Annotation sidecars travel with the video**, or a snapshot would arrive with
+every annotation orphaned.
 """
 
 from __future__ import annotations
@@ -23,15 +24,11 @@ from ....core.errors import FileOperationError
 from ....core.logging import get_logger
 from ....media.source import VIDEO_EXTENSIONS
 from ....persistence.sidecar import sidecar_path_for
-from .models import ERRORS_FOLDER, ClassEntry
 
 __all__ = [
+    "copy_media",
     "discover_videos",
-    "move_media",
-    "move_to_class",
-    "move_to_errors",
     "scan_output_subfolders",
-    "undo_move",
 ]
 
 _log = get_logger(__name__)
@@ -57,7 +54,11 @@ def discover_videos(directory: Path) -> list[Path]:
 
 
 def scan_output_subfolders(output_dir: Path) -> list[tuple[str, list[Path]]]:
-    """``[(folder_name, [videos…]), …]`` for each non-empty class folder."""
+    """``[(folder_name, [videos…]), …]`` for each non-empty class folder.
+
+    Only used to import an old move-based session once; see
+    :meth:`~vidtriage.plugins.builtin.triage.session.Session.import_legacy_output`.
+    """
     results: list[tuple[str, list[Path]]] = []
     if not output_dir.is_dir():
         return results
@@ -79,65 +80,60 @@ def scan_output_subfolders(output_dir: Path) -> list[tuple[str, list[Path]]]:
     return results
 
 
-def move_media(source: Path, destination: Path) -> Path:
-    """Move a video and its annotation sidecar. Refuses to clobber.
+def copy_media(source: Path, destination: Path, *, link: bool = False) -> Path:
+    """Copy a video and its annotation sidecar to ``destination``.
+
+    Args:
+        link: Try a hardlink first. A corpus of video is large enough that
+            copying it is the slow part of a snapshot, and a hardlink is free.
+            Falls back to a real copy when the destination is on another
+            filesystem or the platform refuses — so passing this is always safe,
+            never a different result, only a faster one.
 
     Raises:
-        FileOperationError: if the source is gone, the destination is taken by a
-            different file, or the move fails.
+        FileOperationError: the source is gone, the destination is taken, or the
+            copy failed.
     """
     if not source.exists():
         raise FileOperationError(f"Source no longer exists: {source}")
-    if source.resolve() == destination.resolve():
-        return destination
     if destination.exists():
         raise FileOperationError(
             f"Refusing to overwrite an existing file.\n\n"
-            f"Destination: {destination}\nSource: {source}\n\n"
-            f"Rename or remove the destination and try again.",
+            f"Destination: {destination}\nSource: {source}",
         )
 
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(os.fspath(source), os.fspath(destination))
+        _place(source, destination, link=link)
     except OSError as exc:
-        raise FileOperationError(f"Could not move {source.name}: {exc}") from exc
+        raise FileOperationError(f"Could not copy {source.name}: {exc}") from exc
 
-    _move_sidecar(source, destination)
+    _copy_sidecar(source, destination, link=link)
     return destination
 
 
-def _move_sidecar(source: Path, destination: Path) -> None:
+def _place(source: Path, destination: Path, *, link: bool) -> None:
+    if link:
+        try:
+            os.link(os.fspath(source), os.fspath(destination))
+        except OSError as exc:
+            # Cross-device, a filesystem without hardlinks, or a hardlink limit.
+            # None of those are the user's problem — copy and carry on.
+            _log.debug("Hardlink failed for %s (%s); copying", source.name, exc)
+        else:
+            return
+    shutil.copy2(os.fspath(source), os.fspath(destination))
+
+
+def _copy_sidecar(source: Path, destination: Path, *, link: bool) -> None:
     """Best-effort: keep annotations attached to the video that owns them."""
     old = sidecar_path_for(source)
     if not old.exists():
         return
     new = sidecar_path_for(destination)
     try:
-        new.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(os.fspath(old), os.fspath(new))
-        _log.debug("Moved sidecar %s -> %s", old.name, new)
+        _place(old, new, link=link)
     except OSError as exc:
-        # The video already moved; failing here would leave inconsistent state
-        # for something the user can fix by hand.
-        _log.warning("Could not move sidecar %s: %s", old.name, exc)
-
-
-def move_to_class(source: Path, output_dir: Path, class_entry: ClassEntry) -> Path:
-    destination = output_dir / class_entry.name / source.name
-    result = move_media(source, destination)
-    _log.info("CLASSIFY [%s:%s] %s -> %s", class_entry.key, class_entry.name, source, result)
-    return result
-
-
-def move_to_errors(source: Path, output_dir: Path) -> Path:
-    destination = output_dir / ERRORS_FOLDER / source.name
-    result = move_media(source, destination)
-    _log.info("ERROR %s -> %s", source, result)
-    return result
-
-
-def undo_move(destination: Path, original_path: Path) -> Path:
-    result = move_media(destination, original_path)
-    _log.info("UNDO %s -> %s", destination, result)
-    return result
+        # The video is already in place; failing the whole snapshot over a
+        # sidecar would be a worse outcome than a warning the user can act on.
+        _log.warning("Could not copy sidecar %s: %s", old.name, exc)

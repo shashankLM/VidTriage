@@ -61,11 +61,17 @@ class AppContext(QObject):
         settings: Settings | None = None,
         plugin_manager: PluginManager | None = None,
         parent: QObject | None = None,
+        launch_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(parent)
 
         self.settings = settings or Settings()
         self.plugins = plugin_manager or PluginManager()
+        # How this process was launched, for plugins that take command-line
+        # arguments. Distinct from ``settings`` (persisted user preference) and
+        # from ``PluginContext.settings`` (persisted per-plugin state): these
+        # apply to this run only and are never written back.
+        self.launch_options: dict[str, Any] = dict(launch_options or {})
 
         # ── extension registries ────────────────────────────────────────
         self.commands = CommandRegistry()
