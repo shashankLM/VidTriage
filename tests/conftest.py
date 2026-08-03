@@ -11,17 +11,77 @@ which is before any fixture body runs — so a session-scoped fixture that sets
 ``HOME`` sets it too late, and every test then reads and writes the real config
 directory. conftest is imported ahead of the test modules, which makes this the
 only place early enough. ``test_isolation.py`` asserts it worked.
+
+Because the directory is created at import time, no fixture teardown owns it and
+cleaning it up is this module's job too — on the way out for a run that ends,
+and on the way in for one that did not.
 """
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-ISOLATED_HOME = Path(tempfile.mkdtemp(prefix="label_kit-test-home-"))
+_HOME_PREFIX = "labelkit-test-home-"
+_OWNER_FILE = "owner.pid"
+#: How long an unstamped home is presumed to belong to a run still starting up.
+_STARTUP_GRACE_SECONDS = 60
+
+
+def _sweep_abandoned_homes(root: Path) -> None:
+    """Delete the test homes of runs that are no longer alive.
+
+    ``atexit`` covers a clean exit and a Ctrl-C, but not SIGKILL, the OOM killer
+    or an IDE's stop button. A home leaked that way is never collected by
+    anything afterwards, because nothing else knows the directory exists —
+    eighteen had accumulated before anyone looked. Each run stamps its pid, so a
+    later run can tell an abandoned home from one currently in use.
+
+    ``os.kill(pid, 0)`` is a POSIX liveness idiom; on Windows that call
+    *terminates* the process, so the sweep does not run there.
+    """
+    if os.name != "posix":
+        return
+    for home in root.glob(f"{_HOME_PREFIX}*"):
+        if home.is_dir() and not _owner_is_alive(home):
+            shutil.rmtree(home, ignore_errors=True)
+
+
+def _owner_is_alive(home: Path) -> bool:
+    try:
+        pid = int((home / _OWNER_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # The stamp lands just after mkdtemp, so an unstamped home is either a
+        # run still starting up or a leak from before stamping existed. Age
+        # tells them apart. Keeping one too long costs an empty directory;
+        # getting it wrong the other way deletes a live run's HOME mid-test.
+        return _age_seconds(home) < _STARTUP_GRACE_SECONDS
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # The pid exists; it just belongs to another user.
+    return True
+
+
+def _age_seconds(home: Path) -> float:
+    try:
+        return time.time() - home.stat().st_mtime
+    except OSError:
+        return 0.0  # Vanished under us — treat as busy and leave it alone.
+
+
+ISOLATED_HOME = Path(tempfile.mkdtemp(prefix=_HOME_PREFIX))
+(ISOLATED_HOME / _OWNER_FILE).write_text(str(os.getpid()), encoding="utf-8")
+atexit.register(shutil.rmtree, ISOLATED_HOME, ignore_errors=True)
+_sweep_abandoned_homes(Path(tempfile.gettempdir()))
 os.environ["HOME"] = str(ISOLATED_HOME)
 os.environ["USERPROFILE"] = str(ISOLATED_HOME)
 

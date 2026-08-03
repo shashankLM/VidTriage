@@ -120,6 +120,15 @@ real session list with pytest temp directories; the app then restored one of
 them on the next real launch. `tests/test_isolation.py` guards this. If it
 fails, every other test is touching your home directory.
 
+Creating it that early also means no fixture teardown owns it, so conftest
+cleans up in both directions: `atexit` for a run that ends, and a pid-stamped
+sweep at import for one that did not. `atexit` does not survive SIGKILL, the OOM
+killer or an IDE stop button, and a home leaked that way is invisible to
+everything afterwards — eighteen had accumulated in `/tmp` before anyone looked.
+The sweep must never get it backwards: an unstamped directory is spared for
+`_STARTUP_GRACE_SECONDS`, because deleting a live run's `HOME` mid-test costs
+far more than leaving an empty directory around.
+
 ### Qt tests run offscreen
 Docks never report `isVisible()` in that mode. Assert on the persisted flag and
 on `focusWidget()` instead of on real visibility or focus.

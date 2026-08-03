@@ -12,9 +12,15 @@ If this file fails, every other test is silently touching your home directory.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 
-from conftest import ISOLATED_HOME
+import pytest
+from conftest import _HOME_PREFIX, _OWNER_FILE, ISOLATED_HOME, _sweep_abandoned_homes
 
 from label_kit.persistence.settings import CONFIG_DIR, default_settings_path, user_plugin_dir
 from label_kit.plugins.builtin.triage.config import SESSIONS_FILE
@@ -37,6 +43,70 @@ def test_every_writable_location_is_inside_the_test_home(tmp_path):
         default_log_dir(tmp_path),
     ):
         assert path.is_relative_to(ISOLATED_HOME), f"{path} escapes the test home"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the sweep is a POSIX pid check")
+class TestAbandonedHomeSweep:
+    """A run killed outright must not leak its temp HOME forever.
+
+    ``atexit`` cleans up a run that ends, including under Ctrl-C. Nothing
+    cleans up after SIGKILL, the OOM killer or an IDE's stop button, and the
+    leaked directory is invisible to everything afterwards — eighteen of them
+    had piled up in ``/tmp``. The next run collects them, which means it has to
+    tell a dead run's home from a live one's without ever getting it backwards.
+    """
+
+    def test_a_dead_runs_home_is_removed(self, tmp_path):
+        home = _fake_home(tmp_path, "dead", pid=_a_reaped_pid())
+        _sweep_abandoned_homes(tmp_path)
+        assert not home.exists()
+
+    def test_a_live_runs_home_is_left_alone(self, tmp_path):
+        """Two suites running at once must not delete each other's HOME."""
+        home = _fake_home(tmp_path, "live", pid=os.getpid())
+        _sweep_abandoned_homes(tmp_path)
+        assert home.exists()
+
+    def test_an_unstamped_home_is_spared_while_it_is_young(self, tmp_path):
+        """The stamp lands just after mkdtemp, and that gap must not be fatal."""
+        home = _fake_home(tmp_path, "starting-up", pid=None)
+        _sweep_abandoned_homes(tmp_path)
+        assert home.exists()
+
+    def test_an_unstamped_home_is_removed_once_it_is_old(self, tmp_path):
+        """Leaks predating the stamp are still leaks."""
+        home = _fake_home(tmp_path, "ancient", pid=None)
+        stale = time.time() - 3600
+        os.utime(home, (stale, stale))
+        _sweep_abandoned_homes(tmp_path)
+        assert not home.exists()
+
+    def test_nothing_else_in_the_temp_dir_is_touched(self, tmp_path):
+        unrelated = tmp_path / "someone-elses-work"
+        unrelated.mkdir()
+        _sweep_abandoned_homes(tmp_path)
+        assert unrelated.exists()
+
+    def test_the_sweep_spares_the_home_this_suite_is_using(self):
+        """The real call, against the real temp dir, as conftest makes it."""
+        _sweep_abandoned_homes(Path(tempfile.gettempdir()))
+        assert ISOLATED_HOME.exists()
+        assert CONFIG_DIR.parent == ISOLATED_HOME
+
+
+def _fake_home(root: Path, name: str, *, pid: int | None) -> Path:
+    home = root / f"{_HOME_PREFIX}{name}"
+    home.mkdir()
+    if pid is not None:
+        (home / _OWNER_FILE).write_text(str(pid), encoding="utf-8")
+    return home
+
+
+def _a_reaped_pid() -> int:
+    """A pid that has certainly exited: started, waited on, and collected."""
+    process = subprocess.Popen([sys.executable, "-c", ""])
+    process.wait()
+    return process.pid
 
 
 class TestLegacyMigration:
