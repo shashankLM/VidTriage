@@ -89,6 +89,23 @@ def save_config(config: AppConfig) -> None:
     CONFIG_FILE.write_text(json.dumps({"sessions": sessions_data}, indent=2))
 
 
+UI_STATE_FILE = CONFIG_DIR / "ui_state.json"
+
+
+def load_ui_state() -> dict:
+    if not UI_STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(UI_STATE_FILE.read_text())
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def save_ui_state(state: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    UI_STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
 def parse_classes(text: str) -> tuple[list[ClassEntry], list[str]]:
     entries: list[ClassEntry] = []
     errors: list[str] = []

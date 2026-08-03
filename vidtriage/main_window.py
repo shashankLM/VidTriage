@@ -12,6 +12,7 @@ from .models import ClassEntry
 from .session import Session
 from .player import CvPlayerWidget
 from .file_explorer import FileExplorerWidget
+from .config import load_ui_state, save_ui_state
 from .theme import THEMES, current_theme, set_theme
 
 
@@ -40,7 +41,7 @@ class MainWindow(QMainWindow):
         self._classified_n: int = 0
 
         self._build_ui()
-        QApplication.instance().setStyleSheet(current_theme().app_stylesheet())
+        self._restore_ui_state()
         self._sync_explorer()
 
         QApplication.instance().installEventFilter(self)
@@ -784,7 +785,63 @@ class MainWindow(QMainWindow):
 
         return False
 
+    def _restore_ui_state(self) -> None:
+        state = load_ui_state()
+
+        theme_name = state.get("theme", "Dark")
+        if theme_name in THEMES:
+            set_theme(theme_name)
+            for act in self._theme_group.actions():
+                if act.data() == theme_name:
+                    act.setChecked(True)
+        QApplication.instance().setStyleSheet(current_theme().app_stylesheet())
+        self._player.apply_theme()
+        self._file_explorer.apply_theme()
+
+        zoom = state.get("zoom", 1.0)
+        if zoom != 1.0:
+            self._zoom_factor = max(0.5, min(zoom, 3.0))
+            self._apply_zoom()
+
+        if state.get("explorer_visible") is not None:
+            visible = state["explorer_visible"]
+            self._act_explorer.setChecked(visible)
+
+        if state.get("frame_overlay") is not None:
+            self._act_frame_overlay.setChecked(state["frame_overlay"])
+
+        w = state.get("window_width", 1200)
+        h = state.get("window_height", 750)
+        self.resize(w, h)
+
+        if state.get("fullscreen"):
+            self.showFullScreen()
+
+        if state.get("speed") is not None:
+            speed = state["speed"]
+            self._player.set_speed(speed)
+            for act in self._speed_group.actions():
+                if act.data() == speed:
+                    act.setChecked(True)
+
+        if state.get("splitter_sizes"):
+            self._splitter.setSizes(state["splitter_sizes"])
+
+    def _save_ui_state(self) -> None:
+        save_ui_state({
+            "theme": current_theme().name,
+            "zoom": self._zoom_factor,
+            "explorer_visible": self._act_explorer.isChecked(),
+            "frame_overlay": self._act_frame_overlay.isChecked(),
+            "window_width": self.width(),
+            "window_height": self.height(),
+            "fullscreen": self.isFullScreen(),
+            "speed": self._player.speed,
+            "splitter_sizes": self._splitter.sizes(),
+        })
+
     def closeEvent(self, event) -> None:
+        self._save_ui_state()
         QApplication.instance().removeEventFilter(self)
         self._player.cleanup()
         super().closeEvent(event)
