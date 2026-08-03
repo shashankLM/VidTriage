@@ -62,6 +62,39 @@ class TestPlaybackClock:
         assert clock.step_index(1, 10, direction=-1) == 6
 
 
+class TestImageFileSource:
+    @pytest.fixture
+    def still(self, tmp_path):
+        import cv2
+        import numpy as np
+
+        path = tmp_path / "still.png"
+        cv2.imwrite(str(path), np.zeros((40, 60, 3), np.uint8))
+        return path
+
+    def test_one_frame_at_index_zero(self, still):
+        from label_kit.media.source import ImageFileSource
+
+        with ImageFileSource(still) as source:
+            assert source.info.frame_count == 1
+            frame = source.read()
+            assert frame.ref.index == 0
+            assert source.read() is None
+
+    def test_a_closed_source_is_end_of_stream_not_an_empty_frame(self, still):
+        """``close`` empties the pixel buffer, so a later seek must not rewind.
+
+        A video reports ``None`` once closed; this reported a ``0x0`` frame,
+        which then travels as far as whatever tries to render or infer on it.
+        """
+        from label_kit.media.source import ImageFileSource
+
+        source = ImageFileSource(still)
+        source.close()
+        source.seek(0)
+        assert source.read() is None
+
+
 class TestVideoFileSource:
     def test_reports_metadata(self, sample_video):
         with VideoFileSource(sample_video) as source:

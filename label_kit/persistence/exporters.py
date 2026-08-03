@@ -13,7 +13,9 @@ labels, producing a directory you can point a training run at directly.
 from __future__ import annotations
 
 import csv
+import re
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +24,7 @@ from typing import Any
 from ..core.annotations import Annotation, AnnotationKind, rle_encode
 from ..core.geometry import Mask, Polygon, Rect, Size, bounding_rect_of
 from ..core.logging import get_logger
-from .sidecar import write_json_atomic
+from .sidecar import load_annotations, load_image_size, write_json_atomic
 
 __all__ = [
     "CocoExporter",
@@ -33,11 +35,14 @@ __all__ = [
     "Exporter",
     "YoloExporter",
     "builtin_exporters",
+    "items_from_library",
+    "items_from_store",
 ]
 
 _log = get_logger(__name__)
 
 _UNLABELLED = "unlabelled"
+_SLUG_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,30 @@ class ExportRequest:
     @property
     def annotation_count(self) -> int:
         return sum(len(item.annotations) for item in self.items)
+
+    def stems(self) -> list[str]:
+        """A filename base per item, in item order, guaranteed unique.
+
+        :attr:`ExportItem.stem` is ``<filename>_<frame>``, which stops being
+        unique the moment two source files share a name — ``a/clip.mp4`` and
+        ``b/clip.mp4`` want the same label file and the same extracted frame.
+        One would overwrite the other and the result would look like a complete
+        dataset, so the parent directory disambiguates instead.
+        """
+        counts = Counter(item.stem for item in self.items)
+        taken: set[str] = set()
+        stems: list[str] = []
+        for item in self.items:
+            base = item.stem
+            if counts[base] > 1:
+                parent = _SLUG_UNSAFE.sub("-", item.media_path.parent.name).strip("-")
+                base = f"{parent}_{base}" if parent else base
+            candidate, suffix = base, 2
+            while candidate in taken:
+                candidate, suffix = f"{base}_{suffix}", suffix + 1
+            taken.add(candidate)
+            stems.append(candidate)
+        return stems
 
 
 @dataclass
@@ -126,23 +155,23 @@ class Exporter(ABC):
         warnings: list[str] = []
         into.mkdir(parents=True, exist_ok=True)
 
-        by_media: dict[Path, list[ExportItem]] = {}
-        for item in request.items:
-            by_media.setdefault(item.media_path, []).append(item)
+        by_media: dict[Path, list[tuple[ExportItem, str]]] = {}
+        for item, stem in zip(request.items, request.stems(), strict=True):
+            by_media.setdefault(item.media_path, []).append((item, stem))
 
-        for media_path, items in by_media.items():
+        for media_path, pairs in by_media.items():
             try:
                 source = open_source(media_path)
             except Exception as exc:  # noqa: BLE001 - one bad file must not abort the export
                 warnings.append(f"{media_path.name}: cannot open ({exc})")
                 continue
             try:
-                for item in sorted(items, key=lambda i: i.frame_index):
+                for item, stem in sorted(pairs, key=lambda pair: pair[0].frame_index):
                     frame = source.read_at(item.frame_index)
                     if frame is None:
                         warnings.append(f"{media_path.name}: frame {item.frame_index} unreadable")
                         continue
-                    out = into / f"{item.stem}.{request.image_format}"
+                    out = into / f"{stem}.{request.image_format}"
                     if cv2.imwrite(str(out), frame.to_bgr()):
                         written.append(out)
                     else:
@@ -183,11 +212,13 @@ class CocoExporter(Exporter):
         annotations: list[dict[str, Any]] = []
         next_id = 1
 
-        for image_id, item in enumerate(request.items, start=1):
+        for image_id, (item, stem) in enumerate(
+            zip(request.items, request.stems(), strict=True), start=1,
+        ):
             width, height = item.image_size.as_int()
             images.append({
                 "id": image_id,
-                "file_name": f"{item.stem}.{request.image_format}",
+                "file_name": f"{stem}.{request.image_format}",
                 "width": width,
                 "height": height,
                 "label_kit_source": item.media_path.name,
@@ -218,7 +249,7 @@ class CocoExporter(Exporter):
                     entry["area"] = int(full.sum())
                 elif annotation.kind is AnnotationKind.POINT:
                     report.warnings.append(
-                        f"{item.stem}: point '{self._label_of(annotation)}' exported "
+                        f"{stem}: point '{self._label_of(annotation)}' exported "
                         f"as a zero-area box (COCO has no point geometry)",
                     )
 
@@ -255,6 +286,13 @@ class YoloExporter(Exporter):
     YOLO's detection format is boxes only, so polygons and masks export as their
     bounding boxes. That is lossy, so it is reported per shape kind rather than
     passing silently.
+
+    **Class ids in an existing ``classes.txt`` are preserved.** A label file
+    stores an id, not a name, so the two only mean anything together. Rewriting
+    the class list from just this export's labels used to renumber every earlier
+    file in the directory — export a folder of cats, then a folder of dogs, and
+    the cats came back labelled dog with nothing to indicate it. Existing ids
+    keep their positions and new labels are appended after them.
     """
 
     id = "yolo"
@@ -264,15 +302,18 @@ class YoloExporter(Exporter):
 
     def export(self, request: ExportRequest) -> ExportReport:
         report = ExportReport(item_count=len(request.items))
-        labels = request.labels
-        class_ids = {label: i for i, label in enumerate(labels)}
 
         root = request.destination
         label_dir = root / "labels"
         label_dir.mkdir(parents=True, exist_ok=True)
+        classes_file = root / "classes.txt"
+
+        existing = _read_classes(classes_file)
+        labels = existing + [label for label in request.labels if label not in existing]
+        class_ids = {label: i for i, label in enumerate(labels)}
 
         lossy: set[str] = set()
-        for item in request.items:
+        for item, stem in zip(request.items, request.stems(), strict=True):
             lines: list[str] = []
             for annotation in item.annotations:
                 if annotation.kind in (AnnotationKind.POLYGON, AnnotationKind.MASK):
@@ -286,14 +327,19 @@ class YoloExporter(Exporter):
                 )
                 report.annotation_count += 1
 
-            out = label_dir / f"{item.stem}.txt"
+            out = label_dir / f"{stem}.txt"
             out.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
             report.written.append(out)
 
-        classes_file = root / "classes.txt"
         classes_file.write_text("\n".join(labels) + "\n", encoding="utf-8")
         report.written.append(classes_file)
 
+        if existing:
+            added = len(labels) - len(existing)
+            report.warnings.append(
+                f"classes.txt already listed {len(existing)} class(es); their ids were "
+                f"kept and {added} new one(s) appended",
+            )
         for kind in sorted(lossy):
             report.warnings.append(
                 f"{kind} annotations were reduced to bounding boxes (YOLO detection format)",
@@ -356,6 +402,15 @@ def builtin_exporters() -> list[Exporter]:
     return [CocoExporter(), YoloExporter(), CsvExporter()]
 
 
+def _read_classes(path: Path) -> list[str]:
+    """Class names already in a ``classes.txt``, in id order. Empty if absent."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
 def items_from_store(
     media_path: Path,
     image_size: Size,
@@ -369,3 +424,46 @@ def items_from_store(
         ExportItem(media_path, index, image_size, tuple(by_frame[index]))
         for index in sorted(by_frame)
     ]
+
+
+def items_from_library(paths: Iterable[Path]) -> tuple[list[ExportItem], list[str]]:
+    """Export items for every annotated file in a playlist, read from sidecars.
+
+    One export can then cover a whole session's work. Doing it per file was not
+    just tedious: the only way to assemble a dataset was to point several
+    exports at one directory, which is exactly the case the formats handle worst.
+
+    Unannotated files are skipped silently. A file whose dimensions cannot be
+    established is skipped *loudly* — YOLO coordinates are normalised, so
+    guessing a size would write plausible, wrong numbers.
+    """
+    items: list[ExportItem] = []
+    warnings: list[str] = []
+    for path in paths:
+        annotations = load_annotations(path)
+        if not annotations:
+            continue
+        size = load_image_size(path) or _probe_size(path)
+        if size is None:
+            warnings.append(f"{path.name}: cannot determine image size, skipped")
+            continue
+        items.extend(items_from_store(path, size, annotations))
+    return items, warnings
+
+
+def _probe_size(media_path: Path) -> Size | None:
+    """Open the media purely to read its dimensions.
+
+    The fallback for a sidecar written before sizes were recorded, or by hand.
+    """
+    from ..media.source import open_source
+
+    try:
+        source = open_source(media_path)
+    except Exception as exc:  # noqa: BLE001 - an unreadable file is a skip, not a crash
+        _log.warning("Cannot size %s: %s", media_path.name, exc)
+        return None
+    try:
+        return source.info.size
+    finally:
+        source.close()

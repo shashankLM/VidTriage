@@ -32,7 +32,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.logging import get_logger
-from ..persistence.exporters import ExportRequest, items_from_store
+from ..persistence.exporters import (
+    ExportItem,
+    ExportRequest,
+    items_from_library,
+    items_from_store,
+)
 from ..view.theme import current_theme
 
 if TYPE_CHECKING:
@@ -47,6 +52,9 @@ __all__ = [
 ]
 
 _log = get_logger(__name__)
+
+_SCOPE_LIBRARY = "library"
+_SCOPE_CURRENT = "current"
 
 _STATUS_HINT = {
     "active": "Running.",
@@ -169,16 +177,26 @@ class PluginDialog(QDialog):
 
 
 class ExportDialog(QDialog):
-    """Pick a format and a destination, then run the exporter."""
+    """Pick a scope, a format and a destination, then run the exporter."""
 
     def __init__(self, app: AppContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._app = app
         self.setWindowTitle("label-kit — Export Annotations")
-        self.resize(560, 260)
+        self.resize(560, 300)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
+
+        self._scope = QComboBox()
+        self._scope.addItem("Every annotated file in the playlist", _SCOPE_LIBRARY)
+        self._scope.addItem("Current file only", _SCOPE_CURRENT)
+        self._scope.setToolTip(
+            "A dataset usually spans the whole session. Exporting one file at a "
+            "time into the same folder is what the label formats handle worst.",
+        )
+        self._scope.currentIndexChanged.connect(lambda _i: self._update_summary())
+        form.addRow("Export:", self._scope)
 
         self._format = QComboBox()
         for exporter in app.exporters:
@@ -244,34 +262,59 @@ class ExportDialog(QDialog):
         self._app.settings.set("export.last_dir", str(self._chosen.parent))
         self._ok_button.setEnabled(True)
 
-    def _build_request(self) -> ExportRequest | None:
+    def _current_items(self) -> list[ExportItem]:
         media = self._app.current_media
         info = self._app.media_info
-        if media is None or info is None or self._chosen is None:
+        if media is None or info is None:
+            return []
+        return items_from_store(media, info.size, self._app.annotations.all())
+
+    def _library_items(self) -> tuple[list[ExportItem], list[str]]:
+        """Every annotated file in the playlist.
+
+        The open file is taken from the live store rather than from its sidecar,
+        so an export includes edits that autosave has not written out yet —
+        without this the last few annotations drawn would be missing, which is
+        the kind of loss nobody notices until training.
+        """
+        app = self._app
+        current = app.current_media
+        items, warnings = items_from_library(p for p in app.library.items if p != current)
+        return self._current_items() + items, warnings
+
+    def _gather(self) -> tuple[list[ExportItem], list[str]]:
+        if self._scope.currentData() == _SCOPE_CURRENT:
+            return self._current_items(), []
+        return self._library_items()
+
+    def _build_request(self, items: list[ExportItem]) -> ExportRequest | None:
+        if self._chosen is None or not items:
             return None
         return ExportRequest(
             destination=self._chosen,
-            items=items_from_store(media, info.size, self._app.annotations.all()),
+            items=items,
             write_frames=self._write_frames.isChecked(),
         )
 
     def _update_summary(self) -> None:
-        store = self._app.annotations
-        frames = len(store.frames_with_annotations())
+        items, warnings = self._gather()
+        annotations = sum(len(item.annotations) for item in items)
+        files = len({item.media_path for item in items})
+        note = f"  ({len(warnings)} file(s) skipped)" if warnings else ""
         self._summary.setText(
-            f"{len(store)} annotation(s) across {frames} frame(s) "
-            f"of the current file will be exported.",
+            f"{annotations} annotation(s) across {len(items)} frame(s) "
+            f"of {files} file(s) will be exported.{note}",
         )
 
     def _run(self) -> None:
         exporter = self._current_exporter()
-        request = self._build_request()
+        items, skipped = self._gather()
+        request = self._build_request(items)
         if exporter is None or request is None:
-            self._app.status("Nothing to export", 3000)
-            self.reject()
-            return
-        if not request.items:
-            self._app.status("This file has no annotations yet", 4000)
+            self._app.status(
+                "Nothing to export — no annotations in scope" if exporter else "Nothing to export",
+                4000,
+            )
             self.reject()
             return
 
@@ -283,9 +326,11 @@ class ExportDialog(QDialog):
             self.reject()
             return
 
-        for warning in report.warnings:
+        for warning in (*skipped, *report.warnings):
             _log.warning("Export: %s", warning)
-        self._app.status(f"Exported — {report.summary}", 8000)
+        total = len(skipped) + len(report.warnings)
+        note = f" · {total} warning(s), see the log" if total else ""
+        self._app.status(f"Exported — {report.summary}{note}", 8000)
         self.accept()
 
 

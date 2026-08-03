@@ -41,6 +41,7 @@ __all__ = [
     "delete_sidecar",
     "existing_sidecar_for",
     "load_annotations",
+    "load_image_size",
     "load_into_store",
     "save_annotations",
     "save_store",
@@ -140,27 +141,38 @@ def save_annotations(
     return path
 
 
-def load_annotations(media_path: Path) -> list[Annotation]:
-    """Read a sidecar. Missing or corrupt files yield an empty list.
+def _read_payload(media_path: Path) -> tuple[Path, dict[str, Any]] | None:
+    """``(sidecar path, parsed object)``, or ``None`` if there is nothing usable.
 
-    A malformed sidecar must not stop the user opening the video, so the failure
-    is logged and treated as "no annotations yet". Individual bad entries are
-    skipped rather than discarding the whole file.
+    A malformed sidecar must not stop the user opening the video, so every
+    failure here is logged and reported as "no sidecar".
     """
     path = existing_sidecar_for(media_path)
     if path is None:
-        return []
-    if path.suffix and path.name.endswith(LEGACY_SIDECAR_SUFFIX):
+        return None
+    if path.name.endswith(LEGACY_SIDECAR_SUFFIX):
         _log.info("Reading legacy sidecar %s; it will migrate on next save", path.name)
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         _log.warning("Ignoring unreadable sidecar %s: %s", path.name, exc)
-        return []
+        return None
     if not isinstance(data, dict):
         _log.warning("Ignoring malformed sidecar %s: not an object", path.name)
+        return None
+    return path, data
+
+
+def load_annotations(media_path: Path) -> list[Annotation]:
+    """Read a sidecar. Missing or corrupt files yield an empty list.
+
+    Individual bad entries are skipped rather than discarding the whole file.
+    """
+    found = _read_payload(media_path)
+    if found is None:
         return []
+    path, data = found
 
     source_id = source_id_for(media_path)
     annotations: list[Annotation] = []
@@ -170,6 +182,26 @@ def load_annotations(media_path: Path) -> list[Annotation]:
         except (KeyError, TypeError, ValueError) as exc:
             _log.warning("Skipping bad annotation in %s: %s", path.name, exc)
     return annotations
+
+
+def load_image_size(media_path: Path) -> Size | None:
+    """The media dimensions recorded in the sidecar, if it has them.
+
+    Lets an export cover a whole playlist without opening and decoding every
+    file just to learn how big it is — which matters because YOLO coordinates
+    are normalised, so the size is not optional.
+    """
+    found = _read_payload(media_path)
+    if found is None:
+        return None
+    raw = found[1].get("image_size")
+    if not (isinstance(raw, list) and len(raw) == 2):
+        return None
+    try:
+        width, height = float(raw[0]), float(raw[1])
+    except (TypeError, ValueError):
+        return None
+    return Size(width, height) if width > 0 and height > 0 else None
 
 
 def load_into_store(store: AnnotationStore, media_path: Path) -> int:

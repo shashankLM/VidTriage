@@ -186,7 +186,7 @@ def snapshot_only(args: argparse.Namespace) -> int:
     the decisions, so running it must not become a pass of its own.
     """
     from .core.errors import LabelKitError
-    from .plugins.builtin.triage.config import load_last_session
+    from .plugins.builtin.triage.config import find_session_for_input, load_last_session
     from .plugins.builtin.triage.session import Session
     from .plugins.builtin.triage.snapshot import write_snapshot
 
@@ -196,9 +196,14 @@ def snapshot_only(args: argparse.Namespace) -> int:
         _log.error("No input directory — pass -i, or run the app once to set one up")
         return 2
 
+    # Naming a corpus with -i selects *that* corpus's saved session, matching
+    # what the GUI does. Falling through to the most recent session instead
+    # would build the snapshot with an unrelated directory's output path and
+    # class list.
+    known = find_session_for_input(input_dir) or config
     session = Session(
-        input_dir, args.output_dir or config.output_dir or input_dir,
-        config.classes, logs=args.logs, record=False,
+        input_dir, args.output_dir or known.output_dir or input_dir,
+        known.classes, logs=args.logs, record=False,
     )
     session.load()
 

@@ -279,6 +279,14 @@ plays and never touch the pixels.
 | YOLO labels | `labels/*.txt` plus `classes.txt`; non-box shapes reduce to their bounding box, and that is reported |
 | CSV | One row per annotation |
 
+**Scope is the whole playlist by default** — every annotated file in the
+session, read from its sidecar, with the open file taken live so unsaved edits
+are included. "Current file only" is still there in the dropdown.
+
+Files sharing a name across folders are disambiguated by their parent, and an
+existing `classes.txt` keeps its class ids so a second export into the same
+directory cannot renumber the first one's labels.
+
 Tick **extract the annotated frames** to write the referenced images alongside,
 producing a directory a training run can consume directly.
 

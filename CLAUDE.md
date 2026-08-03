@@ -73,6 +73,15 @@ the database; the folder layout is a build artifact produced on demand by
 - Replay order is the whole contract: logs apply in the order given, records in
   file order, last write wins. That single rule gives both within-log history
   and cross-log overlay.
+- `discover_logs` therefore may not sort on the raw filename. Two runs starting
+  in one second produce `…Z` and `…Z-1`, and `-` sorts before `Z`, so plain name
+  order replays the newer pass first and lets the older one win. It parses the
+  stamp and counter out of the name instead — which also survives the log
+  directory being copied, where sorting on mtime would not.
+- `import_legacy_output` is gated on the corpus's **log directory**, never on
+  the replay stack. Emptying the stack in the setup dialog means "ignore those
+  passes"; reading it as "never triaged" rescans the output directory — often a
+  snapshot this tool wrote — and invents a full set of classifications.
 - A snapshot **refuses a non-empty target**. Writing into one leaves copies from
   a previous run in class folders they no longer belong to, and nothing can
   detect that afterwards.
@@ -94,6 +103,22 @@ Declared in `dependencies` so the default install gets readable tracebacks, but
 plain-text path. `RichHandler` runs with `markup=False`: log messages
 interpolate arbitrary paths, and a filename containing `[` would otherwise be
 eaten as a style tag. Table cells are `rich.text.Text` for the same reason.
+
+### An export names files, and those names are load-bearing
+Two things here look cosmetic and are not:
+
+* `ExportRequest.stems()` disambiguates duplicates. `ExportItem.stem` is
+  `<filename>_<frame>`, so `a/clip.mp4` and `b/clip.mp4` want one label file and
+  one extracted frame between them. Never write a file named from `item.stem`
+  directly.
+* `YoloExporter` **preserves the class ids already in `classes.txt`**. A label
+  file stores an id; only that file says what the id means. Rewriting the list
+  from one export's labels renumbers every file already in the directory —
+  export cats, then dogs, and the cats come back labelled dog with nothing
+  anywhere to indicate it.
+
+Export scope defaults to the whole playlist, reading each file's sidecar; the
+open file comes from the live store so unsaved edits are included.
 
 ### Menus, shortcuts and help are generated
 From the command registry. Registering a `Command` with a `shortcut` is the

@@ -27,7 +27,7 @@ from pathlib import Path
 from ....app.library import discover_media
 from ....core.errors import FileOperationError
 from ....core.logging import get_logger
-from ....persistence.sidecar import sidecar_path_for
+from ....persistence.sidecar import existing_sidecar_for, sidecar_path_for
 
 __all__ = [
     "copy_media",
@@ -110,9 +110,15 @@ def _place(source: Path, destination: Path, *, link: bool) -> None:
 
 
 def _copy_sidecar(source: Path, destination: Path, *, link: bool) -> None:
-    """Best-effort: keep annotations attached to the file that owns them."""
-    old = sidecar_path_for(source)
-    if not old.exists():
+    """Best-effort: keep annotations attached to the file that owns them.
+
+    Reads under either name and always writes the current one, so a snapshot of
+    a corpus annotated before the rename arrives with its annotations intact and
+    already migrated. Looking only for the current name silently produced a
+    deliverable with every VidTriage-era annotation stripped out.
+    """
+    old = existing_sidecar_for(source)
+    if old is None:
         return
     new = sidecar_path_for(destination)
     try:

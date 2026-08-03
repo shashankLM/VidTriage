@@ -16,7 +16,7 @@ from typing import Any
 from ....core.logging import get_logger
 from ....persistence.settings import CONFIG_DIR
 from ....persistence.sidecar import write_json_atomic
-from .models import MAX_CLASSES, ClassEntry, TriageConfig
+from .models import ERRORS_FOLDER, MAX_CLASSES, ClassEntry, TriageConfig
 
 __all__ = [
     "SESSIONS_FILE",
@@ -143,6 +143,12 @@ def parse_classes(text: str) -> tuple[list[ClassEntry], list[str]]:
             continue
         if "/" in name or "\\" in name or name in (".", ".."):
             errors.append(f"{name!r} is not a usable folder name")
+            continue
+        if name == ERRORS_FOLDER:
+            # Everything downstream treats this name as the error bucket:
+            # is_error, the summary's error count and the snapshot folder. A
+            # class sharing it would be silently absorbed into that bucket.
+            errors.append(f"{ERRORS_FOLDER!r} is reserved — X files to it already")
             continue
         if len(entries) >= MAX_CLASSES:
             errors.append(f"Maximum {MAX_CLASSES} classes (keys 1-{MAX_CLASSES})")

@@ -715,6 +715,119 @@ class TestHelpFormatter:
         assert args.safe_mode and args.verbose
 
 
+class TestHeadlessSnapshot:
+    """``--snapshot`` builds the deliverable with no display and no Qt."""
+
+    def test_input_dir_selects_that_corpus_own_session(self, tmp_path):
+        """Not whatever session happened to run last, which the GUI already knows.
+
+        The output directory is where a pre-log run left its class folders, so
+        reading it off the wrong session imports another corpus's decisions and
+        ships them in this corpus's deliverable.
+        """
+        from label_kit.__main__ import parse_args, snapshot_only
+        from label_kit.plugins.builtin.triage.config import save_session
+        from label_kit.plugins.builtin.triage.models import ClassEntry, TriageConfig
+
+        wanted, wanted_out = tmp_path / "wanted", tmp_path / "wanted_out"
+        other, other_out = tmp_path / "other", tmp_path / "other_out"
+        wanted.mkdir()
+        other.mkdir()
+        (wanted_out / "cat").mkdir(parents=True)
+        (wanted_out / "cat" / "mine.mp4").write_bytes(b"x")
+        (other_out / "dog").mkdir(parents=True)
+        (other_out / "dog" / "theirs.mp4").write_bytes(b"x")
+
+        save_session(TriageConfig(wanted, wanted_out, [ClassEntry("1", "cat")]))
+        # Saved second, so it is the most recent — what the old code picked up.
+        save_session(TriageConfig(other, other_out, [ClassEntry("1", "dog")]))
+
+        target = tmp_path / "deliverable"
+        code = snapshot_only(parse_args(["-i", str(wanted), "--snapshot", str(target)]))
+
+        assert code == 0
+        assert (target / "cat" / "mine.mp4").exists()
+        assert not (target / "dog").exists(), "another corpus's files reached this snapshot"
+
+
+class TestExportScope:
+    """Export covers the session by default, because a dataset is not one file.
+
+    Per-file was the only option, so assembling a dataset meant pointing several
+    exports at one directory — the case the label formats handle worst.
+    """
+
+    @pytest.fixture
+    def annotated_library(self, full_app, tmp_path, sample_video, pump):
+        from label_kit.core.annotations import Annotation
+        from label_kit.core.frames import FrameRef, source_id_for
+        from label_kit.core.geometry import Rect, Size
+        from label_kit.persistence.sidecar import save_annotations
+
+        context, _window = full_app
+        paths = []
+        for name, label in (("one.mp4", "cat"), ("two.mp4", "dog")):
+            path = tmp_path / name
+            shutil.copy(sample_video, path)
+            save_annotations(
+                path,
+                [Annotation(FrameRef(source_id_for(path), 0), Rect(1, 1, 9, 9), label=label)],
+                Size(160, 120),
+            )
+            paths.append(path)
+        context.library.set_items(paths, keep_current=False)
+        pump(500)
+        return context, paths
+
+    def test_the_default_scope_is_every_annotated_file(self, annotated_library, pump):
+        from label_kit.app.dialogs import ExportDialog
+
+        context, paths = annotated_library
+        dialog = ExportDialog(context)
+        try:
+            items, warnings = dialog._gather()
+            assert {i.media_path.name for i in items} == {p.name for p in paths}
+            assert warnings == []
+            assert "2 file(s)" in dialog._summary.text()
+        finally:
+            dialog.deleteLater()
+
+    def test_the_open_file_comes_from_the_live_store(self, annotated_library, pump):
+        """Otherwise the last few annotations drawn are missing from the export.
+
+        Autosave writes on leaving a file, so whatever is on screen has edits
+        the sidecar has not seen.
+        """
+        from label_kit.app.dialogs import ExportDialog
+        from label_kit.core.annotations import Annotation
+        from label_kit.core.geometry import Rect
+
+        context, _paths = annotated_library
+        frame = context.current_frame
+        assert frame is not None
+        context.annotations.add(Annotation(frame.ref, Rect(20, 20, 40, 40), label="unsaved"))
+
+        dialog = ExportDialog(context)
+        try:
+            items, _warnings = dialog._gather()
+            labels = {a.label for item in items for a in item.annotations}
+            assert "unsaved" in labels
+        finally:
+            dialog.deleteLater()
+
+    def test_current_file_only_is_still_available(self, annotated_library, pump):
+        from label_kit.app.dialogs import ExportDialog
+
+        context, _paths = annotated_library
+        dialog = ExportDialog(context)
+        try:
+            dialog._scope.setCurrentIndex(1)
+            items, _warnings = dialog._gather()
+            assert {i.media_path for i in items} == {context.current_media}
+        finally:
+            dialog.deleteLater()
+
+
 class TestLaunchOptions:
     """``-i`` names a triage session, so it has to reach the triage plugin.
 
@@ -952,3 +1065,60 @@ class TestFileSearch:
         assert command is not None
         assert command.id == "triage.search"
         assert command.menu_path[0] == "View"
+
+
+class TestLeavingTheSession:
+    """The playlist is shared, so anything can replace it out from under triage."""
+
+    def test_the_dead_keys_are_explained(self, triage, tmp_path, sample_video, pump):
+        """Open Folder elsewhere and the number keys stop doing anything.
+
+        Refusing to classify is right — the alternative is filing a decision
+        against a file the user is not looking at. But in silence it reads as a
+        broken keyboard, with the file panel still listing the old corpus.
+        """
+        context, plugin, _source, _output = triage
+        messages: list[str] = []
+        context.status_message.connect(lambda text, _t: messages.append(text))
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        shutil.copy(sample_video, elsewhere / "unrelated.mp4")
+        context.library.set_items([elsewhere / "unrelated.mp4"], keep_current=False)
+        pump(200)
+
+        assert plugin.current_item is None
+        assert not context.commands.require("triage.classify.1").enabled
+        assert any("not part of the triage session" in m.lower() for m in messages), messages
+
+    def test_it_is_said_once_per_departure(self, triage, tmp_path, sample_video, pump):
+        """Navigating a dropped folder should not narrate itself on every file."""
+        context, _plugin, _source, _output = triage
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        for name in ("one.mp4", "two.mp4", "three.mp4"):
+            shutil.copy(sample_video, elsewhere / name)
+        context.library.set_items(sorted(elsewhere.iterdir()), keep_current=False)
+        pump(200)
+
+        messages: list[str] = []
+        context.status_message.connect(lambda text, _t: messages.append(text))
+        context.library.next()
+        context.library.next()
+        pump(200)
+
+        assert not [m for m in messages if "not part of the triage session" in m.lower()]
+
+    def test_returning_to_the_corpus_re_arms_the_keys(self, triage, tmp_path, sample_video, pump):
+        context, plugin, source, _output = triage
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        shutil.copy(sample_video, elsewhere / "unrelated.mp4")
+
+        context.library.set_items([elsewhere / "unrelated.mp4"], keep_current=False)
+        pump(200)
+        context.library.set_items(sorted(source.glob("*.mp4")), keep_current=False)
+        pump(200)
+
+        assert plugin.current_item is not None
+        assert context.commands.require("triage.classify.1").enabled

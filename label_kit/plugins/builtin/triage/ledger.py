@@ -64,6 +64,8 @@ _LOG_KIND = "labelkit-triage-log"
 _HEADER_KINDS = frozenset({_LOG_KIND, "vidtriage-triage-log"})
 
 _SLUG_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+#: ``20260801T195030Z`` or ``20260801T195030Z-1`` — see :func:`new_log_path`.
+_LOG_NAME = re.compile(r"^(?P<stamp>\d{8}T\d{6}Z)(?:-(?P<counter>\d+))?$")
 
 
 @dataclass(frozen=True)
@@ -240,18 +242,35 @@ def default_log_dir(input_dir: Path) -> Path:
 
 
 def discover_logs(directory: Path) -> list[Path]:
-    """Every log in ``directory``, oldest first.
+    """Every log in ``directory``, oldest first — the correct overlay order.
 
-    Names carry a UTC timestamp, so sorting by name sorts by time — which is
-    also the correct default overlay order.
+    Sorted on the timestamp and collision counter parsed out of the name, not on
+    the name itself. Plain string order gets this wrong: two runs starting in the
+    same second produce ``…195030Z`` and ``…195030Z-1``, and ``-`` sorts before
+    ``Z``, so the newer pass would replay first and the older one would win —
+    inverting the single rule the whole overlay model rests on.
+
+    Parsing beats sorting by mtime here because it survives the log directory
+    being copied or restored from a backup, which rewrites every timestamp.
     """
     if not Path(directory).is_dir():
         return []
     try:
-        return sorted(p for p in Path(directory).iterdir() if p.name.endswith(LOG_SUFFIX))
+        logs = [p for p in Path(directory).iterdir() if p.name.endswith(LOG_SUFFIX)]
     except OSError as exc:
         _log.warning("Cannot list %s: %s", directory, exc)
         return []
+    return sorted(logs, key=_replay_order)
+
+
+def _replay_order(path: Path) -> tuple[int, str, int, str]:
+    """Sort key placing logs in the order they were created."""
+    match = _LOG_NAME.match(path.name[: -len(LOG_SUFFIX)])
+    if match is None:
+        # Not one of ours — a hand-placed log. Keep it after the generated ones,
+        # in a stable order, rather than guessing where in the history it fits.
+        return (1, "", 0, path.name)
+    return (0, match["stamp"], int(match["counter"] or 0), path.name)
 
 
 def new_log_path(directory: Path) -> Path:

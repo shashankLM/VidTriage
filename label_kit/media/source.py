@@ -235,6 +235,7 @@ class ImageFileSource(MediaSource):
             fps=0.0,
         )
         self._position = 0
+        self._closed = False
 
     @property
     def info(self) -> MediaInfo:
@@ -245,15 +246,21 @@ class ImageFileSource(MediaSource):
         return self._position
 
     def read(self) -> Frame | None:
-        if self._position != 0:
+        # Closed is end-of-stream, exactly as it is for a video. Without the
+        # check, a seek after close rewinds to a pixel buffer that close() has
+        # already emptied, and the caller gets a 0x0 frame instead of None.
+        if self._closed or self._position != 0:
             return None
         self._position = 1
         return Frame(ref=FrameRef(self.source_id, 0), image=self._image.copy())
 
     def seek(self, index: int) -> None:
+        if self._closed:
+            return
         self._position = 0 if index <= 0 else 1
 
     def close(self) -> None:
+        self._closed = True
         self._image = np.zeros((0, 0, 3), dtype=np.uint8)
 
 

@@ -15,12 +15,14 @@ from label_kit.persistence.exporters import (
     CsvExporter,
     ExportRequest,
     YoloExporter,
+    items_from_library,
     items_from_store,
 )
 from label_kit.persistence.settings import Settings
 from label_kit.persistence.sidecar import (
     SIDECAR_SUFFIX,
     load_annotations,
+    load_image_size,
     load_into_store,
     save_annotations,
     save_store,
@@ -215,6 +217,97 @@ class TestExporters:
         """The fixture 'video' is 18 bytes of nonsense; that must be a warning."""
         report = CocoExporter().export(request_for("out.json", write_frames=True))
         assert any("cannot open" in w or "unreadable" in w for w in report.warnings)
+
+
+class TestExportAcrossFiles:
+    """A dataset spans a session, not one file. The formats notice the difference."""
+
+    @staticmethod
+    def _annotated(path, label):
+        path.write_bytes(b"x")
+        save_annotations(
+            path,
+            [Annotation(FrameRef(source_id_for(path), 0), Rect(10, 10, 50, 50), label=label)],
+            Size(100, 100),
+        )
+        return path
+
+    def test_yolo_keeps_the_class_ids_an_earlier_export_established(self, tmp_path):
+        """A label file stores an id; only ``classes.txt`` says what it means.
+
+        Rewriting the class list from one export's labels renumbered every file
+        already in the directory. Export cats, then dogs, and the cats came back
+        labelled dog — a plausible, wrong dataset with nothing to flag it.
+        """
+        out = tmp_path / "dataset"
+        for name, label in (("clip_a.mp4", "cat"), ("clip_b.mp4", "dog")):
+            media = tmp_path / name
+            media.write_bytes(b"x")
+            YoloExporter().export(ExportRequest(
+                destination=out,
+                items=items_from_store(
+                    media, Size(100, 100),
+                    [Annotation(FrameRef(source_id_for(media), 0), Rect(10, 10, 50, 50),
+                                label=label)],
+                ),
+            ))
+
+        classes = (out / "classes.txt").read_text().split()
+        assert classes == ["cat", "dog"]
+        cat_id = (out / "labels" / "clip_a_000000.txt").read_text().split()[0]
+        assert classes[int(cat_id)] == "cat"
+
+    def test_same_named_files_from_different_folders_do_not_collide(self, tmp_path):
+        """``a/clip.mp4`` and ``b/clip.mp4`` want the same label file."""
+        items = []
+        for folder in ("a", "b"):
+            media = tmp_path / folder / "clip.mp4"
+            media.parent.mkdir()
+            media.write_bytes(b"x")
+            items += items_from_store(
+                media, Size(100, 100),
+                [Annotation(FrameRef(source_id_for(media), 0), Rect(1, 1, 9, 9), label="x")],
+            )
+
+        request = ExportRequest(destination=tmp_path / "out", items=items)
+        assert len(set(request.stems())) == 2, "one export would have overwritten the other"
+
+        report = YoloExporter().export(request)
+        written = sorted(p.name for p in report.written if p.parent.name == "labels")
+        assert written == ["a_clip_000000.txt", "b_clip_000000.txt"]
+
+    def test_the_playlist_is_read_from_sidecars(self, tmp_path):
+        annotated = [
+            self._annotated(tmp_path / "one.mp4", "cat"),
+            self._annotated(tmp_path / "two.mp4", "dog"),
+        ]
+        bare = tmp_path / "three.mp4"
+        bare.write_bytes(b"x")
+
+        items, warnings = items_from_library([*annotated, bare])
+
+        assert [i.media_path.name for i in items] == ["one.mp4", "two.mp4"]
+        assert warnings == [], "a file with no annotations is a skip, not a problem"
+        assert ExportRequest(destination=tmp_path, items=items).labels == ["cat", "dog"]
+
+    def test_a_file_of_unknown_size_is_skipped_loudly(self, tmp_path):
+        """YOLO coordinates are normalised, so a guessed size writes wrong numbers."""
+        media = tmp_path / "sizeless.mp4"
+        self._annotated(media, "cat")
+        # A sidecar written before sizes were recorded, next to media that
+        # cannot be opened to ask.
+        payload = json.loads(sidecar_path_for(media).read_text())
+        del payload["image_size"]
+        sidecar_path_for(media).write_text(json.dumps(payload))
+
+        items, warnings = items_from_library([media])
+        assert items == []
+        assert "sizeless.mp4" in warnings[0]
+
+    def test_the_recorded_size_saves_opening_the_media(self, tmp_path):
+        media = self._annotated(tmp_path / "one.mp4", "cat")
+        assert load_image_size(media) == Size(100, 100)
+        assert load_image_size(tmp_path / "absent.mp4") is None
 
 
 class TestSettings:

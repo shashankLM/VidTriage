@@ -161,8 +161,15 @@ class Session:
         and their class is written into this session's log. Nothing is moved
         back: the point of the change is to stop relocating footage, and doing
         one big move to prove it would be absurd.
+
+        "Once" means *once per corpus*, which is why the guard asks the log
+        directory rather than the replay stack. Those differ: emptying the stack
+        in the setup dialog is how a user says "ignore the previous passes", and
+        reading that as "this corpus has never been triaged" would rescan the
+        output directory — quite possibly a snapshot this tool wrote — and
+        fabricate a full set of classifications out of it.
         """
-        if self.logs:
+        if self.logs or discover_logs(self.log_dir):
             return 0
 
         imported = 0

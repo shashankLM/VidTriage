@@ -171,6 +171,37 @@ class TestLogDiscovery:
         }
         assert names == {default_log_dir(corpus).name}
 
+    def test_two_runs_in_one_second_still_replay_in_order(self, tmp_path):
+        """The collision suffix must not reorder the stack.
+
+        ``new_log_path`` disambiguates a same-second collision with ``-1``, and
+        ``-`` sorts before ``Z`` — so plain name order replays the *newer* pass
+        first and lets the older one win. That silently inverts the one rule the
+        overlay model rests on, and nothing downstream can detect it.
+        """
+        first = new_log_path(tmp_path)
+        write_log(first, ("a.mp4", "early"))
+        second = new_log_path(tmp_path)
+        write_log(second, ("a.mp4", "late"))
+
+        assert second.name.startswith(first.name[: -len(".triage.jsonl")]), (
+            "this test is meaningless unless both logs landed in the same second"
+        )
+        assert [p.name for p in discover_logs(tmp_path)] == [first.name, second.name]
+        assert replay(discover_logs(tmp_path)) == {"a.mp4": "late"}
+
+    def test_a_hand_placed_log_sorts_after_the_generated_ones(self, tmp_path):
+        """An unparseable name has no place in the history, so it goes last."""
+        for name in ("20260101T000000Z", "20260301T000000Z"):
+            (tmp_path / f"{name}.triage.jsonl").touch()
+        (tmp_path / "from-a-colleague.triage.jsonl").touch()
+
+        assert [p.name for p in discover_logs(tmp_path)] == [
+            "20260101T000000Z.triage.jsonl",
+            "20260301T000000Z.triage.jsonl",
+            "from-a-colleague.triage.jsonl",
+        ]
+
     def test_discovery_is_oldest_first(self, tmp_path):
         for name in ("20260101T000000Z", "20260301T000000Z", "20260201T000000Z"):
             (tmp_path / f"{name}.triage.jsonl").touch()
@@ -314,6 +345,41 @@ class TestLegacyImport:
         session.load()
         assert {c.name for c in session.classes} == {"cat", "dog"}
 
+    def test_emptying_the_log_stack_does_not_import_again(self, moved_corpus):
+        """Dropping every log means "ignore those passes", not "never triaged".
+
+        Reading it the second way rescans the output directory — which by then
+        may hold a snapshot this tool wrote — and fabricates a full set of
+        classifications the user never made, writing them into a fresh log.
+        """
+        source, output = moved_corpus
+        Session(source, output, [], logs=[]).load()  # the one real import
+
+        cleared = Session(source, output, [], logs=[])
+        cleared.load()
+
+        assert cleared.classified == [], "the import ran a second time"
+        assert not cleared.log_path.exists(), "and wrote invented decisions to a log"
+
+    def test_a_snapshot_in_the_output_dir_is_never_adopted(self, tmp_path):
+        """The likeliest shape of the bug: output holds this tool's own snapshot."""
+        source = tmp_path / "in"
+        source.mkdir()
+        (source / "a.mp4").write_bytes(b"x")
+
+        session = Session(source, tmp_path / "out", [ClassEntry("1", "cat")], logs=[])
+        session.load()
+        session.classify(session.pending[0], ClassEntry("1", "cat"))
+        write_snapshot(session.classified, tmp_path / "out" / "snap")
+
+        # Reopened with the snapshot as the output directory and the real log
+        # stack, which is what the app does on the next launch.
+        reopened = Session(source, tmp_path / "out" / "snap", [])
+        reopened.load()
+        assert [i.original_path for i in reopened.classified] == [source / "a.mp4"], (
+            "the snapshot's own copies were adopted as extra classified files"
+        )
+
 
 class TestSnapshot:
     @pytest.fixture
@@ -404,6 +470,58 @@ class TestSnapshot:
 
         assert result.written == 3
         assert (tmp_path / "snap" / "cat" / "a.mp4").read_bytes() == b"video-a.mp4"
+
+
+class TestReservedClassNames:
+    def test_errors_cannot_be_used_as_a_class(self):
+        """It is the error bucket. A class sharing the name vanishes into it."""
+        from label_kit.plugins.builtin.triage.config import parse_classes
+
+        entries, errors = parse_classes("cat\n_errors\ndog")
+        assert [e.name for e in entries] == ["cat", "dog"]
+        assert any("_errors" in message for message in errors)
+
+
+class TestSnapshotCarriesAnnotations:
+    """A snapshot without its sidecars is a deliverable with the labels missing."""
+
+    def test_a_legacy_sidecar_travels_with_its_media(self, tmp_path):
+        """Corpora annotated before the rename still have ``.vidtriage.json``.
+
+        The write path looked only for the current name, so those snapshotted
+        as bare media with every annotation left behind — the one direction the
+        rename shim did not cover.
+        """
+        from label_kit.core.annotations import Annotation
+        from label_kit.core.frames import FrameRef, source_id_for
+        from label_kit.core.geometry import Rect
+        from label_kit.persistence.sidecar import (
+            LEGACY_SIDECAR_SUFFIX,
+            SIDECAR_SUFFIX,
+            load_annotations,
+            save_annotations,
+            sidecar_path_for,
+        )
+        from label_kit.plugins.builtin.triage.io_ops import copy_media
+
+        source = tmp_path / "clip.mp4"
+        source.write_bytes(b"x")
+        # Written through the real serialiser and renamed, so this is what
+        # VidTriage actually left on disk rather than an approximation of it.
+        save_annotations(source, [
+            Annotation(FrameRef(source_id_for(source), 0), Rect(1, 2, 3, 4), label="sign"),
+        ])
+        sidecar_path_for(source).rename(
+            source.with_name(source.name + LEGACY_SIDECAR_SUFFIX),
+        )
+
+        destination = tmp_path / "snap" / "cat" / "clip.mp4"
+        copy_media(source, destination)
+
+        assert [a.label for a in load_annotations(destination)] == ["sign"]
+        assert destination.with_name(destination.name + SIDECAR_SUFFIX).exists(), (
+            "the copy should land under the current name, migrating as it goes"
+        )
 
 
 class TestImagesAreJustOneFrameMedia:

@@ -65,6 +65,9 @@ class TriagePlugin(Plugin):
         self._order: list[MediaItem] = []
         self._class_command_ids: list[str] = []
         self._suppress_library_sync = False
+        #: True once the library has moved off this session's corpus, so the
+        #: explanation is given on departure rather than on every keystroke.
+        self._off_session = False
 
     # ── lifecycle ───────────────────────────────────────────────────────
 
@@ -263,6 +266,7 @@ class TriagePlugin(Plugin):
         attach_file_log(session.log_dir)
         session.load()
         self.session = session
+        self._off_session = False
         self._sync_class_commands()
         self._sync_library(prefer_first_pending=True)
 
@@ -318,13 +322,39 @@ class TriagePlugin(Plugin):
     def _has_current(self) -> bool:
         return self.current_item is not None
 
-    def _on_library_current_changed(self, _path: Path | None) -> None:
+    def _on_library_current_changed(self, path: Path | None) -> None:
         """Keep the explorer cursor on whatever the library is showing."""
-        if self._suppress_library_sync or self._explorer is None or self.session is None:
+        if self._suppress_library_sync or self.session is None:
             return
+
         item = self.current_item
         if item is not None:
-            self._explorer.select_item(item)
+            self._off_session = False
+            if self._explorer is not None:
+                self._explorer.select_item(item)
+        elif path is not None and not self._off_session:
+            self._off_session = True
+            self._warn_off_session()
+
+    def _warn_off_session(self) -> None:
+        """Say why the number keys just went dead.
+
+        The playlist is shared, so Open Folder, a drag-and-drop or another
+        plugin can replace it wholesale. ``current_item`` then matches nothing
+        and every classification command disables itself — the safe answer, but
+        by itself it looks like the keyboard has stopped working, because the
+        file panel is still listing the corpus that is no longer on screen.
+        Once per departure, not once per file: navigating a dropped folder
+        should not narrate itself.
+        """
+        ctx = self._ctx
+        if ctx is None:
+            return
+        ctx.app.status(
+            "Not part of the triage session — classification keys are inactive. "
+            "Use File ▸ Triage Session… to triage this folder.",
+            8000,
+        )
 
     def _on_explorer_selected(self, item: MediaItem) -> None:
         ctx = self._ctx
