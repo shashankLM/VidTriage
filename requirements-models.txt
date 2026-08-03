@@ -1,0 +1,11 @@
+# Optional model backends.
+#
+# SAM additionally needs a checkpoint, which is not on PyPI:
+#   mkdir -p ~/.vidtriage/weights && cd ~/.vidtriage/weights
+#   curl -LO https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+#
+# YOLO weights download themselves into ~/.vidtriage/weights on first use.
+
+ultralytics >= 8.2
+segment-anything >= 1.0
+torch >= 2.0

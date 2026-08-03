@@ -1,28 +1,43 @@
 # VidTriage
 
-Rapidly classify videos into user-defined categories using keyboard shortcuts.
+Triage videos into folders, annotate individual frames, and point a model at a
+region to have it do the annotating for you.
 
-Built with PySide6 and OpenCV — no native dependencies beyond conda/pip.
+Built on PySide6 and OpenCV. Model backends are optional — the app runs fine
+without them and tells you what to install if you want them.
 
 ---
 
-## Quick Start
+## Quick start
 
 ```bash
-# Prerequisites: conda environment with Python 3.11
 conda activate py311
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Launch
-python run.py
-
-# Or with pre-filled directories
-python run.py -i /path/to/videos -o /path/to/output
+python run.py                      # or: python -m vidtriage
+python run.py /path/to/videos      # open a folder straight away
+python run.py -i in/ -o out/       # pre-fill a triage session
 ```
 
-## How It Works
+Optional model backends:
+
+```bash
+pip install -r requirements-models.txt
+
+# YOLO weights download themselves on first use.
+# SAM needs a checkpoint:
+mkdir -p ~/.vidtriage/weights && cd ~/.vidtriage/weights
+curl -LO https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+```
+
+---
+
+## The three things it does
+
+### 1. Triage — file whole videos into folders
+
+Press a number key; the video moves into that class's folder and the next one
+loads. `U` undoes, `X` files to `_errors/`, `S` skips.
 
 ```
   Input directory              Output directory
@@ -30,127 +45,222 @@ python run.py -i /path/to/videos -o /path/to/output
   │ video_01.mp4 │  ──[1]──>   │ cat/video_01.mp4     │
   │ video_02.mp4 │  ──[2]──>   │ dog/video_02.mp4     │
   │ video_03.mp4 │  ──[x]──>   │ _errors/video_03.mp4 │
-  │ video_04.mp4 │             │                      │
   └──────────────┘             └──────────────────────┘
 ```
 
-1. **Setup** — Pick input/output directories and define class names
-2. **Classify** — Watch each video and press a number key to classify
-3. **Files move** — Videos are moved (not copied) into class subdirectories
-4. **Resume** — Relaunch anytime; previously classified files are detected from output folders
+Files are **moved**, not copied. Relaunch and previously classified videos are
+picked back up from the output folders. If a move would overwrite an existing
+file it is refused and reported — nothing is ever silently replaced.
 
-## Setup Dialog
+### 2. Annotate — draw on frames
 
-On launch, a setup dialog lets you configure:
+Pick a tool (`B` box, `P` point, `G` polygon), draw, and it is saved against
+that exact frame. Select with `V`, drag to move, grab a handle to resize,
+`Del` to remove, `Ctrl+Z` to undo.
 
-| Field | Description |
+Annotations are stored in a `<video>.vidtriage.json` sidecar next to the media,
+written atomically. The sidecar travels with the video when triage moves it.
+
+### 3. Model-assisted — point at a thing, get an annotation
+
+Choose a model under **Annotate ▸ Prompt With**, then:
+
+| Gesture | What happens |
 |---|---|
-| **Session** | Dropdown of saved sessions (defaults to most recent), or "+ New Session" |
-| **Input directory** | Folder containing videos to classify (must be readable) |
-| **Output directory** | Where classified videos are moved (must be writable) |
-| **Classes** | One name per line — keys auto-assigned `1`-`9` |
+| Drag a box | The model runs inside that region |
+| Click a point | SAM-family models segment the object under the cursor |
+| Right-click | Adds a *negative* point — "not this" |
+| Shift-click | Accumulates points into one prompt, to refine a mask |
+| `Ctrl+R` | Re-runs the last prompt |
 
-The session dropdown remembers all previous input/output/class configurations. Selecting a session populates all fields. Sessions are matched by output directory — launching with the same output dir updates the existing session entry.
+Results arrive as normal annotations, drawn dashed to mark them as predictions.
+**Annotate ▸ Accept Model Predictions** (`Ctrl+Shift+P`) confirms them, keeping
+the originating model id in the annotation's attributes.
 
-Classes are shown in a table view with their key assignments. Click the table to edit as text.
+Inference runs on a worker thread, so the UI never blocks. A newer request
+supersedes an older one, so three quick clicks give you the third answer rather
+than three stale ones.
 
-Example class input:
+---
+
+## Extending it
+
+Everything the user can do is a plugin contribution — including the built-in
+triage workflow. A plugin is one class:
+
+```python
+from vidtriage.plugins.api import Plugin
+
+class MyPlugin(Plugin):
+    id = "myplugin"
+    name = "My Feature"
+
+    def activate(self, ctx):
+        ctx.add_layer(MyOverlay())          # draws over the frame
+        ctx.add_tool(MyTool())              # a new mouse gesture
+        ctx.add_model(MyModel())            # a new inference backend
+        ctx.add_panel(id="myplugin.panel", title="Mine", factory=MyPanel)
+        ctx.add_exporter(MyExporter())
+        ctx.add_command(id="myplugin.go", title="Go", shortcut="Ctrl+Shift+G",
+                        menu="Tools", handler=self.go)
+
+PLUGIN = MyPlugin
 ```
-cat
-dog
-bird
-skip
+
+Drop that in `~/.vidtriage/plugins/` and it loads on next launch. Menus,
+keyboard shortcuts and the overlay/tool/model lists are all *generated from the
+registries*, so there is no menu file to edit and no key-handling chain to add
+a branch to. Disabling the plugin removes everything it contributed.
+
+Three discovery sources, all equal: built-ins, anything advertising the
+`vidtriage.plugins` entry-point group (so `pip install vidtriage-sam3` is
+enough), and drop-ins in `~/.vidtriage/plugins/`.
+
+**View ▸ Plugins** shows what loaded, what did not, and why. Launched from a
+terminal, startup prints the same thing as two tables — plugins, then models
+with their prompt capabilities and, for anything that cannot run, the command
+that fixes it.
+
+### Adding a model
+
+```python
+from vidtriage.plugins.models import Availability, Capability, InferenceModel, ParamSpec
+
+class Sam3Model(InferenceModel):
+    id = "sam3.predict"
+    display_name = "SAM 3"
+    capabilities = Capability.POINT_PROMPT | Capability.BOX_PROMPT
+    parameters = (ParamSpec("threshold", "Threshold", "float", 0.5, 0.0, 1.0),)
+
+    def availability(self):                 # cheap — no heavy imports here
+        return Availability.missing_package("sam3") if ... else Availability.available()
+
+    def load(self):                         # slow; runs off the GUI thread
+        ...
+
+    def infer(self, request):               # returns annotations in image pixels
+        return [request.annotation(mask, label="thing", score=0.9, source=self.id)]
 ```
-Maps to: `[1] cat` `[2] dog` `[3] bird` `[4] skip`
 
-> **Directory rules:** Input and output must be separate, non-overlapping directories.
-> Neither can be inside the other. Both must exist and be accessible.
-> Sessions are persisted in `~/.vidtriage/config.json`.
+`capabilities` is what makes it work everywhere without further wiring: the
+model appears under **Prompt With** for the gestures it accepts, and gets a
+**Run** entry only if it declares `WHOLE_FRAME`. If `availability()` says no,
+it shows disabled with your remedy text instead of failing at click time.
 
-## Menu Bar
+---
 
-| Menu | Items |
-|---|---|
-| **File** | Reopen Setup, Export Annotations, Quit |
-| **Edit** | Undo, Change Classes, Skip |
-| **View** | Frame Number Overlay, File Explorer, Fullscreen, Summary |
-| **Playback** | Speed, Frame Step, End Behavior |
-| **Help** | Keyboard Shortcuts |
+## Architecture
 
-### Playback Options
+```
+vidtriage/
+  core/         Qt-free data model: geometry, frames, annotations,
+                events, registries, commands
+  media/        MediaSource, threaded decoder, playback clock, controller
+  view/         ImageCanvas, overlay layers, annotation items, tools, theme
+  persistence/  Sidecars, COCO/YOLO/CSV exporters, settings
+  plugins/      Plugin contract, inference API, threaded runner
+    builtin/    triage · annotate · yolo · sam · guides
+  app/          Context, thin window, generated menus, transport bar
+```
 
-| Setting | Values | Default |
-|---|---|---|
-| **Speed** | 0.25x, 0.5x, 0.75x, 1x, 1.25x, 1.5x, 1.75x, 2x | 1x |
-| **Frame Step** | 1, 2, 5, 10 frames per arrow key press | 1 |
-| **End Behavior** | Next Video (auto-advance), Loop, Stop | Next Video |
+Each layer may import the ones above it, never below. `core` has no Qt import at
+all — enforced by a test — so the data model is constructible without a
+`QApplication`.
 
-## Keybindings
+Key invariants, each backed by tests:
+
+- **Frames are never mutated.** Overlays paint on top. What a model receives is
+  the true frame, not one with a counter burned into the corner.
+- **Coordinates round-trip exactly.** `widget_to_image` is the exact inverse of
+  `image_to_widget` at any zoom, which is what lets a click become a prompt.
+- **Decoding is off the GUI thread**, with request coalescing and backpressure.
+- **Inference is off the GUI thread**, serialised per model, newest-wins.
+- **Writes are atomic.** A crash mid-save cannot truncate your annotations.
+
+---
+
+## Keyboard
+
+**Help ▸ Keyboard Shortcuts** (`F1`) is generated from the command registry, so
+it is always current. The main ones:
 
 | Key | Action |
 |---|---|
-| `1` – `9` | Classify with mapped class and auto-advance |
-| `Space` | Play / pause |
-| `→` | Step forward (configurable frame count) |
-| `←` | Step backward (configurable frame count) |
-| `↓` | Next file |
-| `↑` | Previous file |
-| `Tab` | Toggle focus between pending and classified lists |
-| `s` | Skip to next pending video |
-| `e` | Toggle file explorer panel |
-| `x` | Move current file to `_errors/` |
-| `h` / `?` | Open help |
-| `F11` | Toggle fullscreen |
-| `Ctrl+Z` | Undo last classification |
-| `Ctrl+Q` | Quit |
+| `1`–`9` | Classify with that class (triage) |
+| `U` / `X` / `S` | Undo classification · move to `_errors` · skip |
+| `Space` · `←` `→` · `↑` `↓` | Play/pause · step frame · previous/next file |
+| `V` `H` `B` `P` `G` | Select · pan · box · point · polygon |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo an annotation edit |
+| `Ctrl+L` | Set the working label |
+| `Ctrl+R` | Re-run the last model prompt |
+| `Ctrl+E` / `Ctrl+S` | Export · save annotations now |
+| `Ctrl+=` `Ctrl+-` `Ctrl+0` `Ctrl+1` | Zoom in · out · fit · actual size |
+| `Tab` · `E` | Switch pending/classified · toggle the file panel |
+| `Ctrl+G` | Ratio guides |
+| `F11` · `F1` · `Ctrl+Q` | Fullscreen · help · quit |
 
-## File Explorer
+Mouse: wheel zooms at the cursor, middle-drag pans, right-click opens a context
+menu.
 
-The left pane has two lists in a vertical split:
+> **Changed from v1:** `Ctrl+Z` now undoes an *annotation* edit. Undo of a
+> *classification* moved to `U`. There are two independent histories now, and
+> annotation edits are by far the more frequent.
 
-- **Pending** — unclassified videos from the input directory
-- **Classified** — videos that have been classified (shows `[class] filename`)
+---
 
-The active list has a blue border. Use `Tab` to switch between them.
-Selecting a classified video lets you reclassify it — press a number key to move it to a different class.
-Toggle the panel with `e` or via **View → File Explorer**.
+## Overlays
 
-## Logs
+Non-destructive, toggled under **View ▸ Overlays**:
 
-An activity log is written to the output directory:
-
-| File | Purpose |
+| Overlay | Purpose |
 |---|---|
-| `vidtriage_activity.log` | Human-readable activity log with timestamps |
+| Frame Counter | Frame index and timestamp, as a HUD |
+| Crosshair | Cursor crosshair with pixel coordinates and RGB readout |
+| Ratio Guides | Horizontal/vertical lines at fractions of the frame (`Ctrl+G`) |
+
+Ratio guides replace the habit of re-encoding a directory of clips with
+`cv2.line` just to see where `h/2` falls. Set them to any fractions you like via
+**View ▸ Overlays ▸ Set Horizontal Guides…**; they are adjustable while the video
+plays and never touch the pixels.
+
+---
 
 ## Export
 
-Use **File → Export Annotations** to save a CSV of all videos and their classifications.
+**File ▸ Export Annotations…** (`Ctrl+E`)
 
-| Column | Description |
+| Format | Notes |
 |---|---|
-| `video` | Original filename |
-| `class` | Assigned class name, or `unclassified` for pending/error videos |
-| `path` | Relative path within the output directory |
+| COCO JSON | Boxes, polygon segmentation, RLE for masks |
+| YOLO labels | `labels/*.txt` plus `classes.txt`; non-box shapes reduce to their bounding box, and that is reported |
+| CSV | One row per annotation |
 
-Defaults to `<outdir>/annotations.csv`. A save dialog lets you pick a different location.
+Tick **extract the annotated frames** to write the referenced images alongside,
+producing a directory a training run can consume directly.
 
-## Supported Formats
+Triage classifications export separately via **File ▸ Export Classifications…**.
 
-`.mp4` `.mkv` `.avi` `.mov` `.wmv` `.flv` `.webm` `.m4v` `.mpg` `.mpeg` `.3gp` `.ts` `.mts`
+---
 
-## Project Structure
+## Development
 
+```bash
+pip install -r requirements.txt
+pip install pytest ruff
+
+pytest                  # default suite, no model weights needed
+pytest -m models        # additionally exercise real YOLO / SAM backends
+ruff check vidtriage tests
 ```
-run.py                   Entry point
-vidtriage/
-  __main__.py            CLI args + app bootstrap
-  wizard.py              Setup dialog (dirs + classes)
-  main_window.py         Main GUI, menubar, keybindings, classification logic
-  player.py              OpenCV video player with speed/step/overlay controls
-  file_explorer.py       Two-list file explorer with status colors
-  session.py             Session state — single source of truth for all data
-  io_ops.py              File move/undo operations
-  config.py              Config persistence + class parsing
-  models.py              Dataclasses (VideoItem, ClassEntry, AppConfig)
-```
+
+`python run.py --no-plugins` starts the bare shell, and `--safe-mode` skips
+drop-in plugins — both useful for isolating a misbehaving extension.
+
+Plugin, decode and layer-paint faults are contained rather than fatal, so the
+report that replaces the crash is the only thing you get: run with `-v` to add
+local variables to those tracebacks. Console output uses `rich` when it is
+installed and falls back to plain text when it is not; the rotating log in the
+session output directory is always plain.
+
+Config lives in `~/.vidtriage/`: `settings.json`, `sessions.json`,
+`plugins.json`, `weights/`, `plugins/`.

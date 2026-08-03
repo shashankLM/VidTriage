@@ -1,0 +1,501 @@
+"""Whole-video triage — the original VidTriage workflow, as a plugin.
+
+Press a number key, the video moves into that class folder, the next one loads.
+Behaviour is unchanged from before the restructure; what changed is that it now
+lives behind the same extension API as everything else. It contributes commands,
+a panel and an exporter, and can be switched off in View ▸ Plugins — leaving a
+plain frame-annotation tool with no trace of classification in the UI.
+
+If the built-in workflow can be expressed this way, so can yours.
+
+**One keybinding moved.** ``Ctrl+Z`` now undoes an *annotation* edit, because
+there are two independent histories and annotation edits are far more frequent.
+Undo of a classification is ``U``. Both appear in Help ▸ Keyboard Shortcuts,
+which is generated from the command registry and so cannot go stale.
+"""
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+
+from PySide6.QtWidgets import QDialog, QFileDialog, QInputDialog, QMessageBox
+
+from ....app.dialogs import show_html
+from ....core.commands import Command
+from ....core.errors import VidTriageError
+from ....core.logging import attach_file_log, get_logger
+from ...api import Plugin, PluginContext
+from .config import load_last_session, parse_classes
+from .explorer import CLASSIFIED, PENDING, FileExplorerWidget
+from .models import MAX_CLASSES, ClassEntry, TriageConfig, VideoItem
+from .session import Session
+from .wizard import SetupWizard
+
+__all__ = ["PLUGIN", "TriagePlugin"]
+
+_log = get_logger(__name__)
+
+
+class TriagePlugin(Plugin):
+    id = "triage"
+    name = "Video Triage"
+    description = "Classify whole videos into folders with the number keys"
+    default_enabled = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.session: Session | None = None
+        self._ctx: PluginContext | None = None
+        self._explorer: FileExplorerWidget | None = None
+        self._order: list[VideoItem] = []
+        self._class_command_ids: list[str] = []
+        self._suppress_library_sync = False
+
+    # ── lifecycle ───────────────────────────────────────────────────────
+
+    def activate(self, ctx: PluginContext) -> None:
+        self._ctx = ctx
+
+        ctx.add_panel(
+            id="triage.explorer", title="Files", area="left",
+            visible_by_default=True, shortcut="E",
+            factory=self._build_explorer,
+        )
+        self._register_static_commands(ctx)
+        ctx.connect(ctx.app.library.current_changed, self._on_library_current_changed)
+        ctx.connect(ctx.app.playback.reached_end, self._on_video_ended)
+
+        last = load_last_session()
+        if last.is_complete and last.input_dir and last.input_dir.is_dir():
+            self._start_session(Session(last.input_dir, last.output_dir, last.classes))
+        else:
+            ctx.app.status("Triage: use File ▸ Triage Session… to pick directories", 8000)
+
+    def deactivate(self) -> None:
+        self._clear_class_commands()
+        self.session = None
+        self._explorer = None
+        self._order = []
+        self._ctx = None
+
+    def _build_explorer(self) -> FileExplorerWidget:
+        self._explorer = FileExplorerWidget()
+        self._explorer.file_selected.connect(self._on_explorer_selected)
+        self._refresh_explorer()
+        return self._explorer
+
+    # ── commands ────────────────────────────────────────────────────────
+
+    def _register_static_commands(self, ctx: PluginContext) -> None:
+        ctx.add_command(
+            id="triage.setup", title="Triage Session…", shortcut="Ctrl+T",
+            menu="File", section="0", order=30, handler=self._open_wizard,
+            description="Choose the input/output directories and class list",
+        )
+        ctx.add_command(
+            id="triage.undo", title="Undo Classification", shortcut="U",
+            menu="Edit", section="2", order=10, handler=self._undo,
+            is_enabled=lambda: bool(self.session and self.session.can_undo),
+        )
+        ctx.add_command(
+            id="triage.error", title="Move To _errors", shortcut="X",
+            menu="Edit", section="2", order=20, handler=self._mark_error,
+            is_enabled=self._has_current,
+        )
+        ctx.add_command(
+            id="triage.skip", title="Skip To Next Pending", shortcut="S",
+            menu="Edit", section="2", order=30, handler=self._skip,
+            is_enabled=lambda: bool(self.session and self.session.pending),
+        )
+        ctx.add_command(
+            id="triage.classes", title="Change Classes…", menu="Edit", section="2",
+            order=40, handler=self._change_classes, is_enabled=lambda: self.session is not None,
+        )
+        ctx.add_command(
+            id="triage.focus", title="Switch Pending / Classified", shortcut="Tab",
+            menu="View", section="2", handler=self._toggle_list_focus,
+            is_enabled=lambda: self._explorer is not None,
+        )
+        ctx.add_command(
+            id="triage.summary", title="Triage Summary", menu="View", section="8",
+            handler=self._show_summary, is_enabled=lambda: self.session is not None,
+        )
+        ctx.add_command(
+            id="triage.export", title="Export Classifications…", menu="File", section="1",
+            order=40, handler=self._export_classifications,
+            is_enabled=lambda: self.session is not None,
+            description="CSV of every video and the class it was filed under",
+        )
+
+    def _sync_class_commands(self) -> None:
+        """One command per class, so 1–9 are bound to whatever the user defined."""
+        ctx = self._ctx
+        if ctx is None:
+            return
+        self._clear_class_commands()
+        if self.session is None:
+            return
+
+        for entry in self.session.classes:
+            command = Command(
+                id=f"triage.classify.{entry.key}",
+                title=f"[{entry.key}]  {entry.name}",
+                shortcut=entry.key,
+                menu="Edit/Classify As",
+                order=int(entry.key) if entry.key.isdigit() else 99,
+                owner=self.id,
+                handler=lambda e=entry: self._classify(e),
+                is_enabled=self._has_current,
+            )
+            ctx.app.commands.add(command, replace=True)
+            self._class_command_ids.append(command.id)
+
+        # Unused digits create a class on the fly, matching the old behaviour.
+        used = {c.key for c in self.session.classes}
+        for digit in (str(i) for i in range(1, MAX_CLASSES + 1)):
+            if digit in used:
+                continue
+            command = Command(
+                id=f"triage.newclass.{digit}",
+                title=f"[{digit}]  New class…",
+                shortcut=digit,
+                menu="Edit/Classify As",
+                section="9",
+                order=int(digit),
+                owner=self.id,
+                handler=lambda d=digit: self._prompt_new_class(d),
+                is_enabled=self._has_current,
+            )
+            ctx.app.commands.add(command, replace=True)
+            self._class_command_ids.append(command.id)
+
+    def _clear_class_commands(self) -> None:
+        if self._ctx is None:
+            return
+        for command_id in self._class_command_ids:
+            self._ctx.app.commands.unregister(command_id)
+        self._class_command_ids.clear()
+
+    # ── session ─────────────────────────────────────────────────────────
+
+    def _open_wizard(self) -> None:
+        ctx = self._ctx
+        if ctx is None:
+            return
+        wizard = SetupWizard(
+            ctx.app.window,
+            prefill_input=self.session.input_dir if self.session else None,
+            prefill_output=self.session.output_dir if self.session else None,
+        )
+        if wizard.exec() != QDialog.DialogCode.Accepted or wizard.result_config is None:
+            return
+        config: TriageConfig = wizard.result_config
+        self._start_session(Session(config.input_dir, config.output_dir, config.classes))
+
+    def _start_session(self, session: Session) -> None:
+        ctx = self._ctx
+        if ctx is None:
+            return
+
+        attach_file_log(session.output_dir)
+        session.load()
+        self.session = session
+        self._sync_class_commands()
+
+        duplicates = session.find_duplicate_names()
+        if duplicates:
+            listing = "\n".join(
+                f"• {name} ({len(paths)}×)" for name, paths in list(duplicates.items())[:10]
+            )
+            QMessageBox.warning(
+                ctx.app.window, "Duplicate filenames",
+                "These filenames appear more than once. Because a video's "
+                "destination is derived from its name, classifying them would "
+                "collide — the second move will be refused rather than "
+                "overwrite the first.\n\n" + listing,
+            )
+
+        self._sync_library(prefer_first_pending=True)
+        ctx.app.status(
+            f"Triage: {len(session.pending)} pending, {len(session.classified)} classified",
+            6000,
+        )
+
+    # ── library <-> session ─────────────────────────────────────────────
+
+    def _sync_library(self, prefer_first_pending: bool = False) -> None:
+        """Rebuild the playlist from session state, pending first."""
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return
+
+        self._order = [*self.session.pending, *self.session.classified]
+        paths = [self.session.playback_path_of(item) for item in self._order]
+
+        self._suppress_library_sync = True
+        try:
+            ctx.app.library.set_items(paths, keep_current=not prefer_first_pending)
+        finally:
+            self._suppress_library_sync = False
+
+        self._refresh_explorer()
+        self._on_library_current_changed(ctx.app.library.current)
+
+    def _refresh_explorer(self) -> None:
+        if self._explorer is not None and self.session is not None:
+            self._explorer.set_items(self.session.pending, self.session.classified)
+
+    @property
+    def current_item(self) -> VideoItem | None:
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return None
+        index = ctx.app.library.index
+        if 0 <= index < len(self._order):
+            return self._order[index]
+        return None
+
+    def _has_current(self) -> bool:
+        return self.current_item is not None
+
+    def _on_library_current_changed(self, _path: Path | None) -> None:
+        """Keep the explorer cursor on whatever the library is showing."""
+        if self._suppress_library_sync or self._explorer is None or self.session is None:
+            return
+        item = self.current_item
+        if item is None:
+            return
+        if item.is_pending:
+            rows = self.session.pending
+            self._explorer.select(PENDING, rows.index(item) if item in rows else 0)
+        else:
+            rows = self.session.classified
+            self._explorer.select(CLASSIFIED, rows.index(item) if item in rows else 0)
+
+    def _on_explorer_selected(self, which: str, row: int) -> None:
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return
+        items = self.session.pending if which == PENDING else self.session.classified
+        if not 0 <= row < len(items):
+            return
+        item = items[row]
+        if item in self._order:
+            ctx.app.library.set_index(self._order.index(item))
+
+    def _toggle_list_focus(self) -> None:
+        if self._explorer is not None:
+            self._explorer.toggle_focus()
+
+    def _on_video_ended(self, _source_id: str) -> None:
+        ctx = self._ctx
+        if ctx is not None and ctx.app.playback.end_mode.value == "next":
+            ctx.app.library.next()
+
+    # ── actions ─────────────────────────────────────────────────────────
+
+    def _classify(self, entry: ClassEntry) -> None:
+        item = self.current_item
+        ctx = self._ctx
+        if item is None or ctx is None or self.session is None:
+            return
+
+        was_pending = item.is_pending
+        if not self._release_current_file():
+            return
+        try:
+            self.session.classify(item, entry)
+        except VidTriageError as exc:
+            QMessageBox.warning(ctx.app.window, "Cannot classify", str(exc))
+            self._sync_library()
+            return
+
+        ctx.app.status(f"{item.name} → {entry.name}", 2500)
+        self._sync_library()
+        if was_pending:
+            self._go_to_next_pending()
+
+    def _mark_error(self) -> None:
+        item = self.current_item
+        ctx = self._ctx
+        if item is None or ctx is None or self.session is None or item.is_error:
+            return
+
+        if not self._release_current_file():
+            return
+        try:
+            self.session.mark_error(item)
+        except VidTriageError as exc:
+            QMessageBox.warning(ctx.app.window, "Cannot move file", str(exc))
+            self._sync_library()
+            return
+
+        ctx.app.status(f"{item.name} → _errors", 2500)
+        self._sync_library()
+        self._go_to_next_pending()
+
+    def _undo(self) -> None:
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return
+        if not self._release_current_file():
+            return
+        try:
+            item = self.session.undo_last()
+        except VidTriageError as exc:
+            QMessageBox.warning(ctx.app.window, "Cannot undo", str(exc))
+            self._sync_library()
+            return
+
+        self._sync_library()
+        if item is None:
+            ctx.app.status("Nothing to undo", 2000)
+            return
+
+        if item in self._order:
+            ctx.app.library.set_index(self._order.index(item))
+        ctx.app.status(f"Undid: {item.name}", 2500)
+
+    def _release_current_file(self) -> bool:
+        """Flush annotations and close the decoder before touching the file.
+
+        Saving first matters: the sidecar has to be written next to the video
+        *before* the move, so :func:`io_ops.move_media` can carry it along.
+        """
+        ctx = self._ctx
+        if ctx is None:
+            return False
+        ctx.app.flush_annotations()
+        ctx.app.playback.close_and_wait()
+        return True
+
+    def _skip(self) -> None:
+        self._go_to_next_pending()
+
+    def _go_to_next_pending(self) -> None:
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return
+        pending = self.session.pending
+        if not pending:
+            ctx.app.status("All videos classified", 6000)
+            return
+
+        current = self.current_item
+        start = self._order.index(current) + 1 if current in self._order else 0
+        ordered = [*range(start, len(self._order)), *range(0, start)]
+        for index in ordered:
+            if self._order[index].is_pending:
+                ctx.app.library.set_index(index)
+                return
+
+    # ── classes ─────────────────────────────────────────────────────────
+
+    def _prompt_new_class(self, key: str) -> None:
+        ctx = self._ctx
+        if ctx is None or self.session is None or self.current_item is None:
+            return
+        name, accepted = QInputDialog.getText(
+            ctx.app.window, "New Class", f"Name for key [{key}]:", text=f"class_{key}",
+        )
+        if not accepted or not name.strip():
+            return
+        entry = self.session.add_class(key, name.strip())
+        self._sync_class_commands()
+        self._classify(entry)
+
+    def _change_classes(self) -> None:
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return
+        text, accepted = QInputDialog.getMultiLineText(
+            ctx.app.window, "VidTriage — Classes",
+            f"One class per line, keys assigned 1-{MAX_CLASSES}:",
+            "\n".join(c.name for c in self.session.classes),
+        )
+        if not accepted:
+            return
+        entries, errors = parse_classes(text)
+        if errors:
+            QMessageBox.warning(
+                ctx.app.window, "Validation Error", "\n".join(f"• {e}" for e in errors),
+            )
+            return
+        self.session.set_classes(entries)
+        self._sync_class_commands()
+        ctx.app.status(f"{len(entries)} classes", 3000)
+
+    # ── reporting ───────────────────────────────────────────────────────
+
+    def _show_summary(self) -> None:
+        from collections import Counter
+
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return
+
+        pending = self.session.pending
+        classified = self.session.classified
+        total = len(pending) + len(classified)
+        counts = Counter(
+            item.class_name for item in classified if not item.is_error and item.class_name
+        )
+        errors = sum(1 for item in classified if item.is_error)
+
+        def row(name: str, count: int, color: str = "") -> str:
+            percent = f"{count / total * 100:.1f}%" if total else "0%"
+            style = f" style='color:{color};'" if color else ""
+            return (
+                f"<tr><td{style}>{name}</td>"
+                f"<td align='right'>{count}</td>"
+                f"<td align='right'>{percent}</td></tr>"
+            )
+
+        rows = "".join(row(name, n) for name, n in counts.most_common())
+        if errors:
+            rows += row("_errors", errors, "#ef5350")
+
+        progress = f"{len(classified) / total * 100:.1f}%" if total else "0%"
+        show_html(
+            ctx.app.window, "Triage Summary",
+            f"<h2>Triage Summary</h2>"
+            f"<p><b>{len(classified)}</b> / {total} classified ({progress}) · "
+            f"<b>{len(pending)}</b> pending</p>"
+            f"<table width='100%' cellpadding='4'>"
+            f"<tr><th align='left'>Class</th><th align='right'>Count</th>"
+            f"<th align='right'>%</th></tr>{rows}</table>",
+            (440, 420),
+        )
+
+    def _export_classifications(self) -> None:
+        ctx = self._ctx
+        if ctx is None or self.session is None:
+            return
+        default = str(self.session.output_dir / "classifications.csv")
+        path, _filter = QFileDialog.getSaveFileName(
+            ctx.app.window, "Export Classifications", default, "CSV Files (*.csv)",
+        )
+        if not path:
+            return
+
+        rows = [
+            (
+                item.name,
+                item.class_name or "unclassified",
+                str(self.session.playback_path_of(item)),
+            )
+            for item in [*self.session.pending, *self.session.classified]
+        ]
+        try:
+            with Path(path).open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["video", "class", "path"])
+                writer.writerows(rows)
+        except OSError as exc:
+            QMessageBox.warning(ctx.app.window, "Export failed", str(exc))
+            return
+        ctx.app.status(f"Exported {len(rows)} row(s) to {Path(path).name}", 6000)
+
+
+PLUGIN = TriagePlugin

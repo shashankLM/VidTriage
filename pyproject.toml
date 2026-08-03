@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vidtriage"
+version = "2.0.0"
+description = "Video and image triage, frame annotation, and model-assisted labelling"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6",
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    # Console output only. Declared as required because the default install
+    # should get readable tracebacks, but every use site degrades to plain text
+    # if the import fails — see vidtriage/core/console.py.
+    "rich>=13.0",
+    "rich-argparse>=1.5",
+]
+
+[project.optional-dependencies]
+# Model backends. Nothing here is required: a missing backend makes its plugin
+# report itself unavailable with an install command, rather than breaking the app.
+yolo = ["ultralytics>=8.2"]
+sam = ["segment-anything>=1.0", "torch>=2.0"]
+models = ["ultralytics>=8.2", "segment-anything>=1.0", "torch>=2.0"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.2", "ruff>=0.6"]
+
+[project.scripts]
+vidtriage = "vidtriage.__main__:main"
+
+# Third-party plugins advertise themselves here; see vidtriage/plugins/manager.py.
+# [project.entry-points."vidtriage.plugins"]
+# my-plugin = "my_package.plugin"
+
+[tool.setuptools.packages.find]
+include = ["vidtriage*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Model-backed tests are opt-in: they need weights on disk and, the first time,
+# network access. Run them with `pytest -m models`, which overrides this.
+addopts = "-ra --strict-markers -m 'not models'"
+markers = [
+    "models: exercises a real model backend; needs weights and possibly network",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# BLE is selected deliberately: a bare `except Exception` should need a reason.
+# The places that have one carry `# noqa: BLE001` with the rationale inline —
+# plugin faults, codec faults and layer paint faults must all stay contained.
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RET", "ARG", "PTH", "RUF", "BLE"]
+ignore = [
+    "E501",    # long lines: a formatter concern, not a correctness one
+    "B008",    # Qt APIs legitimately take calls in argument defaults
+    "B027",    # empty methods in our ABCs are optional hooks, not oversights
+    "ARG002",  # Qt event handlers must keep their signature even when unused
+    "ARG005",  # `lambda checked, x=x:` — Qt passes the arg; the default binds x
+    "RUF001",  # ·, ×, ▸ and friends are intentional in user-facing text
+    "RUF002",
+    "RUF003",
+    "RUF012",  # Qt class attributes are not ClassVar-annotated
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002", "B011", "BLE001", "SIM117"]
+# Atomic writes need the low-level os/open API that pathlib does not expose.
+"vidtriage/persistence/sidecar.py" = ["PTH105", "PTH123"]
+"vidtriage/persistence/exporters.py" = ["PTH123"]
