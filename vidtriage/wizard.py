@@ -191,7 +191,6 @@ class SetupWizard(QDialog):
         self._populate_table()
         self._class_stack.setCurrentIndex(0)
         layout.addWidget(self._class_stack)
-        self._class_stack.setEnabled(False)
 
     # --- Class table/edit toggling ---
 
@@ -260,7 +259,6 @@ class SetupWizard(QDialog):
                 self._class_edit.setPlainText("\n".join(folder_classes))
                 self._populate_table()
 
-        self._class_stack.setEnabled(bool(input_valid and output_valid))
         self._info_label.setText("  |  ".join(parts) if parts else "")
 
     # --- Validation ---
@@ -278,7 +276,17 @@ class SetupWizard(QDialog):
         if not output_text:
             errors.append("Output directory is empty.")
         elif not Path(output_text).is_dir():
-            errors.append("Output directory does not exist.")
+            reply = QMessageBox.question(
+                self, "Create Directory?",
+                f"Output directory does not exist:\n{output_text}\n\nCreate it?",
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    Path(output_text).mkdir(parents=True, exist_ok=True)
+                except OSError as e:
+                    errors.append(f"Could not create output directory: {e}")
+            else:
+                errors.append("Output directory does not exist.")
 
         if errors:
             return input_text, output_text, errors
