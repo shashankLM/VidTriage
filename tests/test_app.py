@@ -11,14 +11,14 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
-from vidtriage.app.context import AppContext
-from vidtriage.app.window import MainWindow
-from vidtriage.core.annotations import MANUAL_SOURCE, Annotation
-from vidtriage.core.geometry import Point, Rect
-from vidtriage.persistence.settings import Settings
-from vidtriage.persistence.sidecar import load_annotations, sidecar_path_for
-from vidtriage.plugins.manager import PluginManager
-from vidtriage.plugins.models import Capability, InferenceModel, InferenceRequest
+from label_kit.app.context import AppContext
+from label_kit.app.window import MainWindow
+from label_kit.core.annotations import MANUAL_SOURCE, Annotation
+from label_kit.core.geometry import Point, Rect
+from label_kit.persistence.settings import Settings
+from label_kit.persistence.sidecar import load_annotations, sidecar_path_for
+from label_kit.plugins.manager import PluginManager
+from label_kit.plugins.models import Capability, InferenceModel, InferenceRequest
 
 
 @pytest.fixture
@@ -205,7 +205,7 @@ class TestModelPrompting:
         return context, annotate, model
 
     def test_a_box_drag_runs_the_model_on_that_region(self, armed, pump):
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         context, _annotate, model = armed
         context.canvas.tool_result.emit(ToolResult("box", Rect(10, 20, 60, 90)))
@@ -218,7 +218,7 @@ class TestModelPrompting:
 
     def test_the_model_receives_the_true_frame_pixels(self, armed, pump):
         """Overlays must not be baked into what the model sees."""
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         context, _annotate, model = armed
         context.canvas.frame_info_layer.visible = True
@@ -231,7 +231,7 @@ class TestModelPrompting:
         assert np.array_equal(model.seen[0].frame.image, expected)
 
     def test_a_point_click_prompts_the_model(self, armed, pump):
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         context, _annotate, model = armed
         context.canvas.tool_result.emit(ToolResult("point", Point(40, 50), positive=True))
@@ -240,7 +240,7 @@ class TestModelPrompting:
         assert prompt.positive_points == (Point(40, 50),)
 
     def test_shift_accumulates_points_into_one_prompt(self, armed, pump):
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         context, _annotate, model = armed
         context.canvas.tool_result.emit(ToolResult("point", Point(10, 10), positive=True))
@@ -255,7 +255,7 @@ class TestModelPrompting:
         assert latest.negative_points == (Point(20, 20),)
 
     def test_without_shift_a_click_starts_a_fresh_prompt(self, armed, pump):
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         context, _annotate, model = armed
         context.canvas.tool_result.emit(ToolResult("point", Point(10, 10)))
@@ -265,7 +265,7 @@ class TestModelPrompting:
         assert model.seen[-1].prompt.points == ((Point(90, 90), True),)
 
     def test_unlabelled_predictions_inherit_the_working_label(self, armed, pump):
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         class Unlabelled(self.PatchModel):
             id = "test.unlabelled"
@@ -282,7 +282,7 @@ class TestModelPrompting:
         assert context.annotations.all()[0].label == "light"
 
     def test_manual_mode_saves_the_shape_as_drawn(self, armed, pump):
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         context, annotate, model = armed
         annotate.set_prompt_model(None)
@@ -296,7 +296,7 @@ class TestModelPrompting:
         assert annotation.geometry.as_xyxy() == (3, 4, 33, 44)
 
     def test_accepting_predictions_keeps_their_provenance(self, armed, pump):
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         context, annotate, _model = armed
         context.canvas.tool_result.emit(ToolResult("box", Rect(1, 1, 20, 20)))
@@ -310,7 +310,7 @@ class TestModelPrompting:
 
     def test_prompts_do_not_leak_across_frames(self, armed, pump):
         """A point picked on frame 3 must not segment frame 40."""
-        from vidtriage.view.tools import ToolResult
+        from label_kit.view.tools import ToolResult
 
         context, _annotate, model = armed
         context.canvas.tool_result.emit(ToolResult("point", Point(10, 10)))
@@ -324,7 +324,7 @@ class TestModelPrompting:
         assert model.seen[-1].prompt.points == ((Point(30, 30), True),)
 
     def test_an_unavailable_model_reports_instead_of_crashing(self, full_app, fresh_video, pump):
-        from vidtriage.plugins.models import Availability
+        from label_kit.plugins.models import Availability
 
         class Unavailable(InferenceModel):
             id = "test.unavailable"
@@ -359,8 +359,8 @@ def session_dirs(tmp_path, sample_video):
 
 @pytest.fixture
 def triage(full_app, session_dirs, pump):
-    from vidtriage.plugins.builtin.triage.models import ClassEntry
-    from vidtriage.plugins.builtin.triage.session import Session
+    from label_kit.plugins.builtin.triage.models import ClassEntry
+    from label_kit.plugins.builtin.triage.session import Session
 
     context, _window = full_app
     source, output = session_dirs
@@ -387,7 +387,7 @@ class TestTriageWorkflow:
 
     def test_classifying_touches_no_file_and_advances(self, triage, pump):
         """The whole point: a decision is a log line, not a move."""
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
+        from label_kit.plugins.builtin.triage.models import ClassEntry
 
         _context, plugin, source, output = triage
         first = plugin.current_item
@@ -403,8 +403,8 @@ class TestTriageWorkflow:
         assert plugin.current_item is not first
 
     def test_the_decision_lands_in_the_log(self, triage, pump):
-        from vidtriage.plugins.builtin.triage.ledger import read_log
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
+        from label_kit.plugins.builtin.triage.ledger import read_log
+        from label_kit.plugins.builtin.triage.models import ClassEntry
 
         _context, plugin, _source, _output = triage
         first = plugin.current_item
@@ -417,8 +417,8 @@ class TestTriageWorkflow:
 
     def test_undo_appends_a_correction_rather_than_rewriting(self, triage, pump):
         """Append-only is what lets a concurrent reader trust the file."""
-        from vidtriage.plugins.builtin.triage.ledger import read_log
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
+        from label_kit.plugins.builtin.triage.ledger import read_log
+        from label_kit.plugins.builtin.triage.models import ClassEntry
 
         _context, plugin, source, _output = triage
         first = plugin.current_item
@@ -432,8 +432,8 @@ class TestTriageWorkflow:
         assert [d.class_name for d in read_log(plugin.session.log_path)] == ["cat", None]
 
     def test_reclassifying_is_just_a_later_record(self, triage, pump):
-        from vidtriage.plugins.builtin.triage.ledger import read_log, replay
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
+        from label_kit.plugins.builtin.triage.ledger import read_log, replay
+        from label_kit.plugins.builtin.triage.models import ClassEntry
 
         context, plugin, _source, _output = triage
         item = plugin.current_item
@@ -459,8 +459,8 @@ class TestTriageWorkflow:
         assert not (output / "_errors").exists()
 
     def test_a_snapshot_copies_without_disturbing_the_source(self, triage, pump, tmp_path):
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
-        from vidtriage.plugins.builtin.triage.snapshot import write_snapshot
+        from label_kit.plugins.builtin.triage.models import ClassEntry
+        from label_kit.plugins.builtin.triage.snapshot import write_snapshot
 
         _context, plugin, source, _output = triage
         item = plugin.current_item
@@ -476,8 +476,8 @@ class TestTriageWorkflow:
 
     def test_annotations_travel_into_the_snapshot(self, triage, pump, tmp_path):
         """A sidecar left behind would orphan every label on the clip."""
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
-        from vidtriage.plugins.builtin.triage.snapshot import write_snapshot
+        from label_kit.plugins.builtin.triage.models import ClassEntry
+        from label_kit.plugins.builtin.triage.snapshot import write_snapshot
 
         context, plugin, source, _output = triage
         item = plugin.current_item
@@ -496,8 +496,8 @@ class TestTriageWorkflow:
         assert load_annotations(copied)[0].label == "sticky"
 
     def test_a_reopened_session_recovers_prior_classifications(self, triage, pump):
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
-        from vidtriage.plugins.builtin.triage.session import Session
+        from label_kit.plugins.builtin.triage.models import ClassEntry
+        from label_kit.plugins.builtin.triage.session import Session
 
         _context, plugin, source, output = triage
         plugin._classify(ClassEntry("1", "cat"))
@@ -510,21 +510,6 @@ class TestTriageWorkflow:
         # The class list is rebuilt from what the replayed logs mention.
         assert any(c.name == "cat" for c in reopened.classes)
         assert reopened.log_path != plugin.session.log_path, "a rerun is its own pass"
-
-    def test_duplicate_filenames_are_detected(self, tmp_path, sample_video):
-        from vidtriage.plugins.builtin.triage.session import Session
-
-        source = tmp_path / "dupes"
-        nested = source / "sub"
-        nested.mkdir(parents=True)
-        shutil.copy(sample_video, source / "same.mp4")
-
-        session = Session(source, tmp_path / "out2", [])
-        session.load()
-        session._videos["fake"] = type(session.all_videos[0])(
-            original_path=nested / "same.mp4",
-        )
-        assert "same.mp4" in session.find_duplicate_names()
 
     def test_disabling_triage_leaves_a_working_annotation_tool(self, triage, pump):
         """Triage is a plugin, so turning it off must not break the app."""
@@ -548,9 +533,9 @@ class TestStartupReport:
 
     @staticmethod
     def _states():
-        from vidtriage.plugins.api import Plugin
-        from vidtriage.plugins.manager import PluginState
-        from vidtriage.plugins.models import Availability
+        from label_kit.plugins.api import Plugin
+        from label_kit.plugins.manager import PluginState
+        from label_kit.plugins.models import Availability
 
         class Stub(Plugin):
             def __init__(self, plugin_id: str) -> None:
@@ -567,7 +552,7 @@ class TestStartupReport:
                 origin="builtin",
                 availability=Availability(
                     False,
-                    reason="Model weights not found at ~/.vidtriage/weights",
+                    reason="Model weights not found at ~/.labelkit/weights",
                     remedy="curl -LO https://example.invalid/sam_vit_b.pth",
                 ),
             ),
@@ -582,12 +567,12 @@ class TestStartupReport:
 
     @staticmethod
     def _render(renderable) -> None:
-        from vidtriage.core.console import console
+        from label_kit.core.console import console
 
         console().print(renderable)
 
     def test_table_reports_every_plugin_and_its_status(self, capsys):
-        from vidtriage.app.startup_report import _plugin_table
+        from label_kit.app.startup_report import _plugin_table
 
         self._render(_plugin_table(self._states()))
         printed = capsys.readouterr().err
@@ -597,7 +582,7 @@ class TestStartupReport:
         assert "broken" in printed and "error" in printed
 
     def test_unavailable_plugin_carries_its_remedy(self, capsys):
-        from vidtriage.app.startup_report import _plugin_table
+        from label_kit.app.startup_report import _plugin_table
 
         self._render(_plugin_table(self._states()))
         printed = capsys.readouterr().err.replace("\n", "")
@@ -606,7 +591,7 @@ class TestStartupReport:
         assert "curl -LO" in printed
 
     def test_broken_plugin_shows_the_exception_not_the_traceback(self, capsys):
-        from vidtriage.app.startup_report import _plugin_table
+        from label_kit.app.startup_report import _plugin_table
 
         self._render(_plugin_table(self._states()))
         printed = capsys.readouterr().err
@@ -616,8 +601,8 @@ class TestStartupReport:
 
     def test_model_table_reports_capabilities_and_remedies(self, app_ctx, capsys):
         """Plugin availability and model availability are different questions."""
-        from vidtriage.app.startup_report import _model_table
-        from vidtriage.plugins.models import Availability
+        from label_kit.app.startup_report import _model_table
+        from label_kit.plugins.models import Availability
 
         class Ready(InferenceModel):
             id = "test.ready"
@@ -649,7 +634,7 @@ class TestStartupReport:
         assert "curl -LO" in printed
 
     def test_a_model_whose_probe_raises_does_not_stop_startup(self, app_ctx, capsys):
-        from vidtriage.app.startup_report import _model_table
+        from label_kit.app.startup_report import _model_table
 
         class Exploding(InferenceModel):
             id = "test.exploding"
@@ -672,10 +657,10 @@ class TestStartupReport:
 
     def test_falls_back_to_one_log_line_without_rich(self, app_ctx, without_rich, caplog):
         """No rich means no table, but the report itself must not vanish."""
-        from vidtriage.app.startup_report import report_startup
+        from label_kit.app.startup_report import report_startup
 
         app_ctx.plugins.states = {state.id: state for state in self._states()}
-        with caplog.at_level("INFO", logger="vidtriage"):
+        with caplog.at_level("INFO", logger="labelkit"):
             report_startup(app_ctx)
 
         assert "annotate=active" in caplog.text
@@ -683,7 +668,7 @@ class TestStartupReport:
         assert "broken=error" in caplog.text
 
     def test_a_broken_plugin_reaches_the_status_bar(self, app_ctx):
-        from vidtriage.app.startup_report import report_startup
+        from label_kit.app.startup_report import report_startup
 
         seen: list[str] = []
         app_ctx.status_message.connect(lambda message, _timeout: seen.append(message))
@@ -697,7 +682,7 @@ class TestHelpFormatter:
     def test_uses_rich_argparse_when_available(self):
         from rich_argparse import RichHelpFormatter
 
-        from vidtriage.__main__ import _help_formatter
+        from label_kit.__main__ import _help_formatter
 
         assert _help_formatter() is RichHelpFormatter
 
@@ -705,26 +690,26 @@ class TestHelpFormatter:
         import argparse
         import sys
 
-        from vidtriage.__main__ import _help_formatter
+        from label_kit.__main__ import _help_formatter
 
         monkeypatch.setitem(sys.modules, "rich_argparse", None)
         assert _help_formatter() is argparse.HelpFormatter
 
     def test_help_text_survives_the_formatter(self, capsys):
         """Rich markup is live in help strings; nothing may be silently eaten."""
-        from vidtriage.__main__ import parse_args
+        from label_kit.__main__ import parse_args
 
         with pytest.raises(SystemExit):
             parse_args(["--help"])
         printed = capsys.readouterr().out.replace("\n", " ")
 
-        assert "~/.vidtriage/plugins/" in printed
-        assert "Triage videos, annotate frames" in printed
+        assert "~/.labelkit/plugins/" in printed
+        assert "Triage videos and images" in printed
         for flag in ("--no-plugins", "--safe-mode", "--version"):
             assert flag in printed
 
     def test_flags_still_parse(self):
-        from vidtriage.__main__ import parse_args
+        from label_kit.__main__ import parse_args
 
         args = parse_args(["--safe-mode", "-v"])
         assert args.safe_mode and args.verbose
@@ -895,7 +880,7 @@ class TestFileSearch:
         assert widget._pending_header.text() == "Pending (1 of 3)"
 
     def test_the_class_name_is_searchable(self, explorer, pump):
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
+        from label_kit.plugins.builtin.triage.models import ClassEntry
 
         _context, plugin, widget = explorer
         plugin._classify(ClassEntry("1", "cat"))

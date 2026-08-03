@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from vidtriage.core.errors import SourceOpenError
-from vidtriage.media.clock import MAX_SPEED, MIN_SPEED, EndMode, PlaybackClock
-from vidtriage.media.source import VideoFileSource
+from label_kit.core.errors import SourceOpenError
+from label_kit.media.clock import MAX_SPEED, MIN_SPEED, EndMode, PlaybackClock
+from label_kit.media.source import VideoFileSource
 
 
 class TestPlaybackClock:
@@ -107,7 +107,7 @@ class TestVideoFileSource:
 class TestPlaybackController:
     @pytest.fixture
     def controller(self, qapp, pump):
-        from vidtriage.media.controller import PlaybackController
+        from label_kit.media.controller import PlaybackController
 
         controller = PlaybackController()
         yield controller

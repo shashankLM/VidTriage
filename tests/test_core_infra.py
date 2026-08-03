@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from vidtriage.core.commands import Command, CommandRegistry
-from vidtriage.core.events import Event
-from vidtriage.core.registry import Registry
+from label_kit.core.commands import Command, CommandRegistry
+from label_kit.core.events import Event
+from label_kit.core.registry import Registry
 
 
 class TestEvent:
@@ -170,10 +170,10 @@ def test_core_never_imports_qt():
     import pkgutil
     import sys
 
-    import vidtriage.core
+    import label_kit.core
 
-    for module_info in pkgutil.iter_modules(vidtriage.core.__path__):
-        name = f"vidtriage.core.{module_info.name}"
+    for module_info in pkgutil.iter_modules(label_kit.core.__path__):
+        name = f"label_kit.core.{module_info.name}"
         importlib.import_module(name)
         source = sys.modules[name]
         offenders = [

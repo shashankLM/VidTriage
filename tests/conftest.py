@@ -1,11 +1,11 @@
 """Shared fixtures.
 
 Qt runs offscreen and ``HOME`` is redirected, so tests never touch the
-developer's real ``~/.vidtriage`` settings, sessions, plugin state or triage
+developer's real ``~/.labelkit`` settings, sessions, plugin state or triage
 logs.
 
 **The redirect happens at import time, not in a fixture, and it has to.**
-``vidtriage.persistence.settings`` computes ``CONFIG_DIR`` from ``Path.home()``
+``label_kit.persistence.settings`` computes ``CONFIG_DIR`` from ``Path.home()``
 once, at module scope. Test modules import it while pytest is *collecting*,
 which is before any fixture body runs — so a session-scoped fixture that sets
 ``HOME`` sets it too late, and every test then reads and writes the real config
@@ -21,7 +21,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-ISOLATED_HOME = Path(tempfile.mkdtemp(prefix="vidtriage-test-home-"))
+ISOLATED_HOME = Path(tempfile.mkdtemp(prefix="label_kit-test-home-"))
 os.environ["HOME"] = str(ISOLATED_HOME)
 os.environ["USERPROFILE"] = str(ISOLATED_HOME)
 
@@ -90,7 +90,7 @@ def fresh_video(sample_video, tmp_path) -> Path:
 
 @pytest.fixture
 def rgb_frame():
-    from vidtriage.core.frames import Frame, FrameRef
+    from label_kit.core.frames import Frame, FrameRef
 
     def _make(index: int = 0, width: int = 64, height: int = 48, source: str = "test.mp4"):
         image = np.zeros((height, width, 3), np.uint8)
@@ -110,7 +110,7 @@ def without_rich(monkeypatch):
     """
     import sys
 
-    from vidtriage.core.console import console
+    from label_kit.core.console import console
 
     monkeypatch.setitem(sys.modules, "rich.console", None)
     console.cache_clear()

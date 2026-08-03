@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from vidtriage.core.annotations import (
+from label_kit.core.annotations import (
     MANUAL_SOURCE,
     Annotation,
     AnnotationKind,
@@ -13,8 +13,8 @@ from vidtriage.core.annotations import (
     rle_decode,
     rle_encode,
 )
-from vidtriage.core.frames import FrameRef
-from vidtriage.core.geometry import Mask, Point, Polygon, Rect, Size
+from label_kit.core.frames import FrameRef
+from label_kit.core.geometry import Mask, Point, Polygon, Rect, Size
 
 SOURCE = "/videos/clip.mp4"
 

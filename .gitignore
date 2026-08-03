@@ -6,17 +6,18 @@ __pycache__/
 .claude/
 dist/
 build/
-vidtriage_log.csv
+labelkit_log.csv
 
 # Test and tooling artefacts
 .pytest_cache/
 .ruff_cache/
 
 # Model weights, if a backend ever falls back to downloading into the CWD.
-# The normal location is ~/.vidtriage/weights/.
+# The normal location is ~/.labelkit/weights/.
 *.pt
 *.pth
 *.onnx
 
 # Annotation sidecars, in case media is ever kept inside the repo.
+*.labelkit.json
 *.vidtriage.json

@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 from PySide6.QtCore import QPointF, Qt
 
-from vidtriage.core.annotations import Annotation, AnnotationStore
-from vidtriage.core.frames import Frame, FrameRef
-from vidtriage.core.geometry import Mask, Point, Polygon, Rect, Size
-from vidtriage.view.canvas import ImageCanvas
-from vidtriage.view.theme import set_theme
-from vidtriage.view.tools import ToolEvent
+from label_kit.core.annotations import Annotation, AnnotationStore
+from label_kit.core.frames import Frame, FrameRef
+from label_kit.core.geometry import Mask, Point, Polygon, Rect, Size
+from label_kit.view.canvas import ImageCanvas
+from label_kit.view.theme import set_theme
+from label_kit.view.tools import ToolEvent
 
 SOURCE = "clip.mp4"
 
@@ -133,7 +133,7 @@ class TestOverlays:
         assert (image.width(), image.height()) == (640, 480)
 
     def test_a_layer_that_raises_is_hidden_not_fatal(self, loaded, pump):
-        from vidtriage.view.layers import OverlayLayer
+        from label_kit.view.layers import OverlayLayer
 
         class Exploding(OverlayLayer):
             id = "test.explode"
@@ -150,7 +150,7 @@ class TestOverlays:
         assert not layer.visible, "a raising layer should disable itself"
 
     def test_add_and_remove(self, loaded):
-        from vidtriage.view.layers import OverlayLayer
+        from label_kit.view.layers import OverlayLayer
 
         class Noop(OverlayLayer):
             id = "test.noop"
@@ -216,7 +216,7 @@ class TestAnnotationItems:
         assert len(canvas._items) == 3
 
     def test_box_resize_uses_the_dragged_handle(self, store):
-        from vidtriage.view.items import BoxItem, Handle
+        from label_kit.view.items import BoxItem, Handle
 
         canvas, _annotation_store = store
         item = next(i for i in canvas._items.values() if isinstance(i, BoxItem))
@@ -227,7 +227,7 @@ class TestAnnotationItems:
         assert resized.y2 == original.y2 + 30
 
     def test_box_cannot_be_resized_to_nothing(self, store):
-        from vidtriage.view.items import BoxItem, Handle
+        from label_kit.view.items import BoxItem, Handle
 
         canvas, _store = store
         item = next(i for i in canvas._items.values() if isinstance(i, BoxItem))
@@ -333,7 +333,7 @@ class TestTools:
 
     def test_registering_a_tool_needs_no_canvas_change(self, loaded):
         """The extension point: a plugin's tool publishes on the same channel."""
-        from vidtriage.view.tools import Tool
+        from label_kit.view.tools import Tool
 
         class Custom(Tool):
             id = "test.custom"

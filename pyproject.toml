@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vidtriage"
+name = "label-kit"
 version = "2.0.0"
-description = "Video and image triage, frame annotation, and model-assisted labelling"
+description = "Triage videos and images, annotate frames, and label with model assistance"
 requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.6",
@@ -13,7 +13,7 @@ dependencies = [
     "numpy>=1.24",
     # Console output only. Declared as required because the default install
     # should get readable tracebacks, but every use site degrades to plain text
-    # if the import fails — see vidtriage/core/console.py.
+    # if the import fails — see label_kit/core/console.py.
     "rich>=13.0",
     "rich-argparse>=1.5",
 ]
@@ -27,14 +27,14 @@ models = ["ultralytics>=8.2", "segment-anything>=1.0", "torch>=2.0"]
 dev = ["pytest>=8.0", "pytest-timeout>=2.2", "ruff>=0.6"]
 
 [project.scripts]
-vidtriage = "vidtriage.__main__:main"
+label-kit = "label_kit.__main__:main"
 
-# Third-party plugins advertise themselves here; see vidtriage/plugins/manager.py.
-# [project.entry-points."vidtriage.plugins"]
+# Third-party plugins advertise themselves here; see label_kit/plugins/manager.py.
+# [project.entry-points."labelkit.plugins"]
 # my-plugin = "my_package.plugin"
 
 [tool.setuptools.packages.find]
-include = ["vidtriage*"]
+include = ["label_kit*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -69,5 +69,5 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG001", "ARG002", "B011", "BLE001", "SIM117"]
 # Atomic writes need the low-level os/open API that pathlib does not expose.
-"vidtriage/persistence/sidecar.py" = ["PTH105", "PTH123"]
-"vidtriage/persistence/exporters.py" = ["PTH123"]
+"label_kit/persistence/sidecar.py" = ["PTH105", "PTH123"]
+"label_kit/persistence/exporters.py" = ["PTH123"]

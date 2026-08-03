@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Launcher. Equivalent to ``python -m vidtriage``."""
+"""Launcher. Equivalent to ``python -m label_kit``."""
 
 import sys
 
-from vidtriage.__main__ import main
+from label_kit.__main__ import main
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -12,13 +12,13 @@ import logging
 
 import pytest
 
-from vidtriage.core.console import console, rich_available
-from vidtriage.core.logging import ROOT_LOGGER_NAME, attach_file_log, configure_logging
+from label_kit.core.console import console, rich_available
+from label_kit.core.logging import ROOT_LOGGER_NAME, attach_file_log, configure_logging
 
 
 @pytest.fixture
 def clean_logger():
-    """Give each test the ``vidtriage`` logger tree to itself.
+    """Give each test the ``label_kit`` logger tree to itself.
 
     ``configure_logging`` and ``attach_file_log`` both mutate a process-global
     logger; without this, a handler installed by one test formats another test's
@@ -64,13 +64,13 @@ class TestConsoleHandler:
         from rich.logging import RichHandler
 
         configure_logging()
-        installed = [h for h in clean_logger.handlers if getattr(h, "_vidtriage_console", False)]
+        installed = [h for h in clean_logger.handlers if getattr(h, "_labelkit_console", False)]
         assert len(installed) == 1
         assert isinstance(installed[0], RichHandler)
 
     def test_falls_back_to_a_plain_handler(self, clean_logger, without_rich):
         configure_logging()
-        installed = [h for h in clean_logger.handlers if getattr(h, "_vidtriage_console", False)]
+        installed = [h for h in clean_logger.handlers if getattr(h, "_labelkit_console", False)]
         assert len(installed) == 1
         assert type(installed[0]) is logging.StreamHandler
 
@@ -78,12 +78,12 @@ class TestConsoleHandler:
         """Without a source-link column, the name is the only subsystem clue."""
         configure_logging()
         logging.getLogger(f"{ROOT_LOGGER_NAME}.media.decoder").warning("no codec")
-        assert "vidtriage.media.decoder: no codec" in capsys.readouterr().err
+        assert "labelkit.media.decoder: no codec" in capsys.readouterr().err
 
     def test_idempotent(self, clean_logger):
         configure_logging()
         configure_logging()
-        installed = [h for h in clean_logger.handlers if getattr(h, "_vidtriage_console", False)]
+        installed = [h for h in clean_logger.handlers if getattr(h, "_labelkit_console", False)]
         assert len(installed) == 1
 
     def test_markup_is_off(self, clean_logger, capsys):
@@ -94,13 +94,13 @@ class TestConsoleHandler:
 
     def test_verbose_enables_locals_in_tracebacks(self, clean_logger):
         configure_logging(verbose=True)
-        handler = next(h for h in clean_logger.handlers if getattr(h, "_vidtriage_console", False))
+        handler = next(h for h in clean_logger.handlers if getattr(h, "_labelkit_console", False))
         assert handler.tracebacks_show_locals
 
     def test_quiet_run_omits_locals(self, clean_logger):
         """Frames and QImages in every contained fault would bury the message."""
         configure_logging()
-        handler = next(h for h in clean_logger.handlers if getattr(h, "_vidtriage_console", False))
+        handler = next(h for h in clean_logger.handlers if getattr(h, "_labelkit_console", False))
         assert not handler.tracebacks_show_locals
 
 
@@ -120,7 +120,7 @@ class TestFileLogStaysPlain:
             handler.flush()
         written = log_path.read_text(encoding="utf-8")
 
-        assert "vidtriage.media.decoder: Frame 12 unreadable" in written
+        assert "labelkit.media.decoder: Frame 12 unreadable" in written
         assert "ValueError: decode failed" in written
         assert "\x1b[" not in written, "ANSI escapes in a file meant for grep"
         assert not set(written) & set("╭╮╰╯│─"), "box drawing in a file meant for grep"

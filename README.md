@@ -1,10 +1,14 @@
-# VidTriage
+# label-kit
 
-Triage videos into folders, annotate individual frames, and point a model at a
-region to have it do the annotating for you.
+Triage videos **and images** into classes, annotate individual frames, and point
+a model at a region to have it do the annotating for you.
 
 Built on PySide6 and OpenCV. Model backends are optional — the app runs fine
 without them and tells you what to install if you want them.
+
+> **Renamed from VidTriage.** Your existing data still works: `~/.vidtriage`
+> moves to `~/.labelkit` on first launch, and `*.vidtriage.json` sidecars are
+> still read (a save rewrites them under the new name).
 
 ---
 
@@ -14,9 +18,9 @@ without them and tells you what to install if you want them.
 conda activate py311
 pip install -r requirements.txt
 
-python run.py                      # or: python -m vidtriage
-python run.py /path/to/videos      # open a folder straight away
-python run.py -i in/ -o out/       # pre-fill a triage session
+python run.py                      # or: python -m label_kit
+python run.py /path/to/media       # open a folder straight away
+python run.py -i in/ -o out/       # start a triage session over in/
 ```
 
 Optional model backends:
@@ -26,7 +30,7 @@ pip install -r requirements-models.txt
 
 # YOLO weights download themselves on first use.
 # SAM needs a checkpoint:
-mkdir -p ~/.vidtriage/weights && cd ~/.vidtriage/weights
+mkdir -p ~/.labelkit/weights && cd ~/.labelkit/weights
 curl -LO https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 ```
 
@@ -34,10 +38,14 @@ curl -LO https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 
 ## The three things it does
 
-### 1. Triage — decide what every video is
+### 1. Triage — decide what every file is
 
-Press a number key; the decision is recorded and the next video loads. `U`
+Press a number key; the decision is recorded and the next file loads. `U`
 undoes, `X` files to `_errors`, `S` skips.
+
+Videos and still images alike, mixed freely in one session. A still is a
+one-frame source, so it plays, annotates, classifies, logs and snapshots through
+exactly the same code — there is nothing to configure and no mode to pick.
 
 **Your files never move.** A decision is one line appended to a log:
 
@@ -55,26 +63,26 @@ later pass overrides an earlier one, so a second opinion never destroys the
 first and dropping a log from the stack cleanly un-applies it:
 
 ```console
-$ vidtriage                                  # replays every log for this corpus
-$ vidtriage --log pass1.jsonl --log pass2.jsonl   # explicit stack, last wins
+$ label-kit                                  # replays every log for this corpus
+$ label-kit --log pass1.jsonl --log pass2.jsonl   # explicit stack, last wins
 ```
 
 The setup dialog (`Ctrl+T`) lists the discovered logs with their decision counts
 and time spans, and lets you reorder or remove them. Logs live in
-`~/.vidtriage/logs/<corpus>/` — outside both the input and output trees.
+`~/.labelkit/logs/<corpus>/` — outside both the input and output trees.
 
 **Snapshot when you want folders.** `File ▸ Snapshot To Class Folders…`, or
 headless:
 
 ```console
-$ vidtriage --snapshot ./deliverable --link
+$ label-kit --snapshot ./deliverable --link
 ```
 
 ```
   Input directory (read-only)      Snapshot
   ┌──────────────┐                 ┌──────────────────────┐
   │ video_01.mp4 │  ───[log]───>   │ cat/video_01.mp4     │
-  │ video_02.mp4 │                 │ dog/video_02.mp4     │
+  │ photo_02.png │                 │ dog/photo_02.png     │
   │ video_03.mp4 │                 │ _errors/video_03.mp4 │
   └──────────────┘                 └──────────────────────┘
 ```
@@ -91,8 +99,10 @@ Pick a tool (`B` box, `P` point, `G` polygon), draw, and it is saved against
 that exact frame. Select with `V`, drag to move, grab a handle to resize,
 `Del` to remove, `Ctrl+Z` to undo.
 
-Annotations are stored in a `<video>.vidtriage.json` sidecar next to the media,
-written atomically. The sidecar is copied alongside its video into a snapshot.
+Annotations are stored in a `<file>.labelkit.json` sidecar next to the media,
+written atomically, and copied alongside it into a snapshot. Stills work
+identically — an image is frame 0 of a one-frame source, so every tool, layer
+and model applies to it unchanged.
 
 ### 3. Model-assisted — point at a thing, get an annotation
 
@@ -122,7 +132,7 @@ Everything the user can do is a plugin contribution — including the built-in
 triage workflow. A plugin is one class:
 
 ```python
-from vidtriage.plugins.api import Plugin
+from label_kit.plugins.api import Plugin
 
 class MyPlugin(Plugin):
     id = "myplugin"
@@ -140,14 +150,14 @@ class MyPlugin(Plugin):
 PLUGIN = MyPlugin
 ```
 
-Drop that in `~/.vidtriage/plugins/` and it loads on next launch. Menus,
+Drop that in `~/.labelkit/plugins/` and it loads on next launch. Menus,
 keyboard shortcuts and the overlay/tool/model lists are all *generated from the
 registries*, so there is no menu file to edit and no key-handling chain to add
 a branch to. Disabling the plugin removes everything it contributed.
 
 Three discovery sources, all equal: built-ins, anything advertising the
-`vidtriage.plugins` entry-point group (so `pip install vidtriage-sam3` is
-enough), and drop-ins in `~/.vidtriage/plugins/`.
+`labelkit.plugins` entry-point group (so `pip install labelkit-sam3` is
+enough), and drop-ins in `~/.labelkit/plugins/`.
 
 **View ▸ Plugins** shows what loaded, what did not, and why. Launched from a
 terminal, startup prints the same thing as two tables — plugins, then models
@@ -157,7 +167,7 @@ that fixes it.
 ### Adding a model
 
 ```python
-from vidtriage.plugins.models import Availability, Capability, InferenceModel, ParamSpec
+from label_kit.plugins.models import Availability, Capability, InferenceModel, ParamSpec
 
 class Sam3Model(InferenceModel):
     id = "sam3.predict"
@@ -185,7 +195,7 @@ it shows disabled with your remedy text instead of failing at click time.
 ## Architecture
 
 ```
-vidtriage/
+label_kit/
   core/         Qt-free data model: geometry, frames, annotations,
                 events, registries, commands
   media/        MediaSource, threaded decoder, playback clock, controller
@@ -284,7 +294,7 @@ pip install pytest ruff
 
 pytest                  # default suite, no model weights needed
 pytest -m models        # additionally exercise real YOLO / SAM backends
-ruff check vidtriage tests
+ruff check label_kit tests
 ```
 
 `python run.py --no-plugins` starts the bare shell, and `--safe-mode` skips
@@ -296,7 +306,7 @@ local variables to those tracebacks. Console output uses `rich` when it is
 installed and falls back to plain text when it is not; the rotating activity log
 in the session's log directory is always plain.
 
-Config lives in `~/.vidtriage/`: `settings.json`, `sessions.json`,
+Config lives in `~/.labelkit/`: `settings.json`, `sessions.json`,
 `plugins.json`, `weights/`, `plugins/`, and `logs/<corpus>/` — the triage
 decision logs, which are the only record of what you classified. Back those up;
 everything else is reproducible.

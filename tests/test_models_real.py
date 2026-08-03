@@ -16,9 +16,9 @@ import cv2
 import numpy as np
 import pytest
 
-from vidtriage.core.frames import Frame, FrameRef
-from vidtriage.core.geometry import Point, Rect
-from vidtriage.plugins.models import (
+from label_kit.core.frames import Frame, FrameRef
+from label_kit.core.geometry import Point, Rect
+from label_kit.plugins.models import (
     BoxPrompt,
     Capability,
     InferenceRequest,
@@ -43,7 +43,7 @@ def scene() -> Frame:
 @pytest.fixture(scope="module")
 def yolo_model():
     """Loaded once per module — weights loading dominates the runtime."""
-    from vidtriage.plugins.builtin.yolo import YoloDetectModel
+    from label_kit.plugins.builtin.yolo import YoloDetectModel
 
     detector = YoloDetectModel()
     if not detector.availability().ok:
@@ -53,7 +53,7 @@ def yolo_model():
 
 @pytest.fixture(scope="module")
 def sam_model():
-    from vidtriage.plugins.builtin.sam import SamModel
+    from label_kit.plugins.builtin.sam import SamModel
 
     segmenter = SamModel()
     availability = segmenter.availability()
@@ -79,7 +79,7 @@ class TestYolo:
         """Ultralytics defaults to downloading into the CWD; we redirect it."""
         from pathlib import Path
 
-        from vidtriage.plugins.builtin.yolo import WEIGHTS_DIR
+        from label_kit.plugins.builtin.yolo import WEIGHTS_DIR
 
         model.run(InferenceRequest(scene, WholeFramePrompt(), model.resolved_params()))
         assert (WEIGHTS_DIR / "yolo11n.pt").exists()
@@ -171,7 +171,7 @@ class TestSamAvailabilityWithoutWeights:
 
     @pytest.mark.skipif(not _HAS_SAM, reason="segment_anything not installed")
     def test_missing_checkpoint_names_the_fix(self, monkeypatch):
-        from vidtriage.plugins.builtin import sam
+        from label_kit.plugins.builtin import sam
 
         monkeypatch.setattr(sam, "find_checkpoint", lambda explicit=None: None)
         availability = sam.SamModel().availability()
@@ -181,7 +181,7 @@ class TestSamAvailabilityWithoutWeights:
 
     @pytest.mark.skipif(not _HAS_SAM, reason="segment_anything not installed")
     def test_capabilities_are_prompt_only(self):
-        from vidtriage.plugins.builtin.sam import SamModel
+        from label_kit.plugins.builtin.sam import SamModel
 
         model = SamModel()
         assert model.capabilities & Capability.POINT_PROMPT

@@ -7,18 +7,18 @@ import json
 import numpy as np
 import pytest
 
-from vidtriage.core.annotations import Annotation, AnnotationStore
-from vidtriage.core.frames import FrameRef, source_id_for
-from vidtriage.core.geometry import Mask, Point, Polygon, Rect, Size
-from vidtriage.persistence.exporters import (
+from label_kit.core.annotations import Annotation, AnnotationStore
+from label_kit.core.frames import FrameRef, source_id_for
+from label_kit.core.geometry import Mask, Point, Polygon, Rect, Size
+from label_kit.persistence.exporters import (
     CocoExporter,
     CsvExporter,
     ExportRequest,
     YoloExporter,
     items_from_store,
 )
-from vidtriage.persistence.settings import Settings
-from vidtriage.persistence.sidecar import (
+from label_kit.persistence.settings import Settings
+from label_kit.persistence.sidecar import (
     SIDECAR_SUFFIX,
     load_annotations,
     load_into_store,
@@ -111,7 +111,7 @@ class TestAtomicWrite:
             raise OSError("disk full")
 
         monkeypatch.setattr("os.replace", explode)
-        from vidtriage.core.errors import PersistenceError
+        from label_kit.core.errors import PersistenceError
 
         with pytest.raises(PersistenceError):
             write_json_atomic(target, {"good": False})

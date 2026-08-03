@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-from vidtriage.core.errors import FileOperationError
-from vidtriage.plugins.builtin.triage.ledger import (
+from label_kit.core.errors import FileOperationError
+from label_kit.plugins.builtin.triage.ledger import (
     Decision,
     Ledger,
     NullLedger,
@@ -25,9 +25,9 @@ from vidtriage.plugins.builtin.triage.ledger import (
     replay,
     summarise,
 )
-from vidtriage.plugins.builtin.triage.models import ClassEntry, VideoItem
-from vidtriage.plugins.builtin.triage.session import Session
-from vidtriage.plugins.builtin.triage.snapshot import plan_snapshot, write_snapshot
+from label_kit.plugins.builtin.triage.models import ClassEntry, MediaItem
+from label_kit.plugins.builtin.triage.session import Session
+from label_kit.plugins.builtin.triage.snapshot import plan_snapshot, write_snapshot
 
 
 def write_log(path, *pairs):
@@ -70,7 +70,7 @@ class TestLedger:
         path = write_log(tmp_path / "l.jsonl", ("a.mp4", "cat"), ("b.mp4", "dog"))
         lines = [json.loads(line) for line in path.read_text().splitlines()]
 
-        assert lines[0]["kind"] == "vidtriage-triage-log"
+        assert lines[0]["kind"] == "labelkit-triage-log"
         assert [(r["file"], r["class"]) for r in lines[1:]] == [("a.mp4", "cat"), ("b.mp4", "dog")]
 
     def test_never_rewrites_an_earlier_record(self, tmp_path):
@@ -158,7 +158,7 @@ class TestLogDiscovery:
         import sys
 
         script = (
-            "from vidtriage.plugins.builtin.triage.ledger import default_log_dir;"
+            "from label_kit.plugins.builtin.triage.ledger import default_log_dir;"
             f"print(default_log_dir({str(corpus)!r}).name)"
         )
         names = {
@@ -320,7 +320,7 @@ class TestSnapshot:
     def classified(self, corpus):
         items = []
         for name, class_name in (("a.mp4", "cat"), ("b.mp4", "dog"), ("c.mp4", "cat")):
-            item = VideoItem(original_path=corpus / name)
+            item = MediaItem(original_path=corpus / name)
             item.history.append(class_name)
             items.append(item)
         return items
@@ -338,7 +338,7 @@ class TestSnapshot:
         assert sorted(p.name for p in corpus.iterdir()) == ["a.mp4", "b.mp4", "c.mp4"]
 
     def test_pending_videos_are_left_out(self, classified, corpus, tmp_path):
-        classified.append(VideoItem(original_path=corpus / "a.mp4"))
+        classified.append(MediaItem(original_path=corpus / "a.mp4"))
         plan = plan_snapshot(classified, tmp_path / "snap")
         assert plan.skipped_pending == 1
 
@@ -363,7 +363,7 @@ class TestSnapshot:
 
         items = []
         for path in (corpus / "a.mp4", nested / "a.mp4"):
-            item = VideoItem(original_path=path)
+            item = MediaItem(original_path=path)
             item.history.append("cat")
             items.append(item)
 
@@ -404,3 +404,105 @@ class TestSnapshot:
 
         assert result.written == 3
         assert (tmp_path / "snap" / "cat" / "a.mp4").read_bytes() == b"video-a.mp4"
+
+
+class TestImagesAreJustOneFrameMedia:
+    """Stills need no special case anywhere — that is the design claim.
+
+    An image is a one-frame source at frame index 0, not a sentinel like -1.
+    Everything downstream — the sidecar key, the log record, the snapshot, the
+    exporters — therefore works on it unchanged, and a session may freely mix
+    videos and images.
+    """
+
+    @pytest.fixture
+    def mixed(self, tmp_path):
+        import cv2
+        import numpy as np
+
+        source = tmp_path / "mixed"
+        source.mkdir()
+        for name in ("photo.png", "shot.jpg"):
+            cv2.imwrite(str(source / name), np.full((48, 64, 3), 90, np.uint8))
+        writer = cv2.VideoWriter(
+            str(source / "clip.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (64, 48),
+        )
+        for i in range(5):
+            writer.write(np.full((48, 64, 3), i * 40, np.uint8))
+        writer.release()
+        return source
+
+    def test_a_session_picks_up_images_alongside_videos(self, mixed, tmp_path):
+        session = Session(mixed, tmp_path / "out", [], logs=[])
+        session.load()
+        assert sorted(i.name for i in session.pending) == ["clip.mp4", "photo.png", "shot.jpg"]
+
+    def test_an_image_is_frame_zero_not_a_sentinel(self, mixed):
+        """-1 would need a special case in every bounds check and exporter."""
+        from label_kit.media.source import open_source
+
+        source = open_source(mixed / "photo.png")
+        try:
+            assert source.info.frame_count == 1
+            frame = source.read()
+            assert frame.ref.index == 0
+            assert source.read() is None, "a still is exactly one frame"
+        finally:
+            source.close()
+
+    def test_classifying_an_image_logs_like_any_other_decision(self, mixed, tmp_path):
+        session = Session(mixed, tmp_path / "out", [ClassEntry("1", "keep")], logs=[])
+        session.load()
+        photo = next(i for i in session.pending if i.name == "photo.png")
+
+        session.classify(photo, ClassEntry("1", "keep"))
+
+        assert [(d.file, d.class_name) for d in read_log(session.log_path)] == [
+            ("photo.png", "keep"),
+        ]
+
+    def test_a_snapshot_carries_images_and_videos_together(self, mixed, tmp_path):
+        session = Session(mixed, tmp_path / "out", [ClassEntry("1", "keep")], logs=[])
+        session.load()
+        for item in list(session.pending):
+            session.classify(item, ClassEntry("1", "keep"))
+
+        result = write_snapshot(session.classified, tmp_path / "snap")
+
+        assert result.written == 3
+        assert (tmp_path / "snap" / "keep" / "photo.png").exists()
+        assert (tmp_path / "snap" / "keep" / "clip.mp4").exists()
+
+    def test_an_images_annotations_ride_along_in_a_snapshot(self, mixed, tmp_path):
+        from label_kit.core.annotations import Annotation
+        from label_kit.core.frames import FrameRef, source_id_for
+        from label_kit.core.geometry import Rect
+        from label_kit.persistence.sidecar import load_annotations, save_annotations
+
+        photo = mixed / "photo.png"
+        save_annotations(photo, [
+            Annotation(FrameRef(source_id_for(photo), 0), Rect(1, 1, 9, 9), label="sign"),
+        ])
+
+        session = Session(mixed, tmp_path / "out", [ClassEntry("1", "keep")], logs=[])
+        session.load()
+        session.classify(
+            next(i for i in session.pending if i.name == "photo.png"), ClassEntry("1", "keep"),
+        )
+        write_snapshot(session.classified, tmp_path / "snap")
+
+        copied = tmp_path / "snap" / "keep" / "photo.png"
+        assert load_annotations(copied)[0].label == "sign"
+
+    def test_an_image_only_directory_works(self, tmp_path):
+        """No requirement that a session contain any video at all."""
+        import cv2
+        import numpy as np
+
+        source = tmp_path / "stills"
+        source.mkdir()
+        cv2.imwrite(str(source / "only.png"), np.full((10, 10, 3), 5, np.uint8))
+
+        session = Session(source, tmp_path / "out", [], logs=[])
+        session.load()
+        assert [i.name for i in session.pending] == ["only.png"]

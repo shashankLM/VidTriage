@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from vidtriage.core.geometry import Mask, Point, Polygon, Rect, Size, ViewTransform
+from label_kit.core.geometry import Mask, Point, Polygon, Rect, Size, ViewTransform
 
 
 class TestRect:

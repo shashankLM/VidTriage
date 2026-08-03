@@ -7,9 +7,9 @@ from collections.abc import Sequence
 
 import pytest
 
-from vidtriage.core.annotations import Annotation
-from vidtriage.core.geometry import Rect
-from vidtriage.plugins.models import (
+from label_kit.core.annotations import Annotation
+from label_kit.core.geometry import Rect
+from label_kit.plugins.models import (
     Availability,
     BoxPrompt,
     Capability,
@@ -19,7 +19,7 @@ from vidtriage.plugins.models import (
     PointPrompt,
     WholeFramePrompt,
 )
-from vidtriage.plugins.runner import InferenceRunner
+from label_kit.plugins.runner import InferenceRunner
 
 
 class EchoModel(InferenceModel):
@@ -124,7 +124,7 @@ class TestInferenceRequest:
 
 class TestPointPrompt:
     def test_splits_positive_and_negative(self):
-        from vidtriage.core.geometry import Point
+        from label_kit.core.geometry import Point
 
         prompt = PointPrompt(((Point(1, 1), True), (Point(2, 2), False)))
         assert prompt.positive_points == (Point(1, 1),)
@@ -218,17 +218,17 @@ class TestRunner:
 
 class TestDiscovery:
     def test_builtins_are_found(self):
-        from vidtriage.plugins.manager import PluginManager
+        from label_kit.plugins.manager import PluginManager
 
         manager = PluginManager()
         manager.discover(user_dir=None)
         assert {"triage", "annotate", "yolo", "sam", "guides"} <= set(manager.states)
 
     def test_drop_in_plugin_is_discovered(self, tmp_path):
-        from vidtriage.plugins.manager import PluginManager
+        from label_kit.plugins.manager import PluginManager
 
         (tmp_path / "hello.py").write_text(
-            "from vidtriage.plugins.api import Plugin\n"
+            "from label_kit.plugins.api import Plugin\n"
             "class HelloPlugin(Plugin):\n"
             "    id = 'hello'\n"
             "    name = 'Hello'\n"
@@ -243,7 +243,7 @@ class TestDiscovery:
 
     def test_a_broken_plugin_is_recorded_not_fatal(self, tmp_path):
         """One bad drop-in must never stop the app from starting."""
-        from vidtriage.plugins.manager import PluginManager
+        from label_kit.plugins.manager import PluginManager
 
         (tmp_path / "broken.py").write_text("raise ValueError('bad plugin')\n")
         manager = PluginManager()
@@ -253,8 +253,8 @@ class TestDiscovery:
         assert {"triage", "annotate"} <= set(manager.states)
 
     def test_dependencies_activate_first(self):
-        from vidtriage.plugins.api import Plugin
-        from vidtriage.plugins.manager import PluginManager, PluginState
+        from label_kit.plugins.api import Plugin
+        from label_kit.plugins.manager import PluginManager, PluginState
 
         class Base(Plugin):
             id = "base"
@@ -275,8 +275,8 @@ class TestDiscovery:
         assert manager.activation_order().index("base") < manager.activation_order().index("dependent")
 
     def test_a_dependency_cycle_is_reported_not_hung(self):
-        from vidtriage.plugins.api import Plugin
-        from vidtriage.plugins.manager import PluginManager, PluginState
+        from label_kit.plugins.api import Plugin
+        from label_kit.plugins.manager import PluginManager, PluginState
 
         class A(Plugin):
             id = "a"
