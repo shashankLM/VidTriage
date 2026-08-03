@@ -1,4 +1,12 @@
-"""The two-list file explorer: pending above, classified below."""
+"""The file panel: a filter box, pending above, classified below.
+
+**The signal carries the item, not a row.** It used to emit ``(list name, row)``
+and the plugin re-derived the item with ``session.pending[row]`` — which is only
+correct while the widget shows every video in the same order the session holds
+them. A filter breaks that assumption immediately: row 0 of a filtered list is
+not video 0 of the session, so a click would have selected a different file than
+the one clicked. Emitting the item makes the mapping impossible to get wrong.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +14,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QSplitter,
@@ -23,15 +32,21 @@ CLASSIFIED = "classified"
 
 
 class FileExplorerWidget(QWidget, ThemedMixin):
-    """Pending and classified videos, with the focused list outlined."""
+    """Pending and classified videos, filterable, with the focused list outlined."""
 
-    file_selected = Signal(str, int)  # list name, row
+    file_selected = Signal(object)  # VideoItem
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Filter…  (Ctrl+F)")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_filter_changed)
+        layout.addWidget(self._search)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         self._pending_header, self._pending_list = self._make_panel(splitter, "Pending")
@@ -49,6 +64,8 @@ class FileExplorerWidget(QWidget, ThemedMixin):
 
         self._pending_items: list[VideoItem] = []
         self._classified_items: list[VideoItem] = []
+        self._visible_pending: list[VideoItem] = []
+        self._visible_classified: list[VideoItem] = []
         self._active = PENDING
 
         self.init_theme()
@@ -76,6 +93,41 @@ class FileExplorerWidget(QWidget, ThemedMixin):
         self._update_focus_style()
         self._refresh()
 
+    # ── filtering ───────────────────────────────────────────────────────
+
+    def focus_search(self) -> None:
+        """Put the cursor in the filter box, ready to replace what is there."""
+        self._search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._search.selectAll()
+
+    @property
+    def filter_text(self) -> str:
+        return self._search.text()
+
+    def clear_filter(self) -> None:
+        self._search.clear()
+
+    def _on_filter_changed(self, _text: str) -> None:
+        self._refresh()
+
+    def keyPressEvent(self, event) -> None:
+        """Escape clears the filter and hands focus back to the list."""
+        if event.key() == Qt.Key.Key_Escape and self._search.text():
+            self.clear_filter()
+            self._active_list().setFocus()
+            return
+        super().keyPressEvent(event)
+
+    def _matches(self, text: str) -> bool:
+        """Every whitespace-separated term must appear, case-insensitively.
+
+        Terms are ANDed so that ``doorway single`` narrows to one clip out of a
+        set whose names share long prefixes — which is the case this box exists
+        for.
+        """
+        haystack = text.lower()
+        return all(term in haystack for term in self._search.text().lower().split())
+
     # ── contents ────────────────────────────────────────────────────────
 
     def set_items(self, pending: list[VideoItem], classified: list[VideoItem]) -> None:
@@ -83,43 +135,63 @@ class FileExplorerWidget(QWidget, ThemedMixin):
         self._classified_items = classified
         self._refresh()
 
+    def _label_for(self, item: VideoItem) -> tuple[str, str]:
+        """``(display text, colour key)``. The class prefix is searchable too."""
+        if item.is_error:
+            return f"[error] {item.name}", "error_item_fg"
+        if item.class_name:
+            return f"[{item.class_name}] {item.name}", "classified_fg"
+        return item.name, "pending_fg"
+
     def _refresh(self) -> None:
         from ....view.theme import current_theme
 
         theme = current_theme()
+        selected = self.selected_item()
 
-        self._fill(
-            self._pending_list,
-            [(item.name, QColor(theme.pending_fg)) for item in self._pending_items],
-        )
-        self._pending_header.setText(f"Pending ({len(self._pending_items)})")
+        self._visible_pending = []
+        pending_rows: list[tuple[str, QColor]] = []
+        for item in self._pending_items:
+            text, _key = self._label_for(item)
+            if self._matches(text):
+                self._visible_pending.append(item)
+                pending_rows.append((text, QColor(theme.pending_fg)))
 
-        rows = []
+        self._visible_classified = []
+        classified_rows: list[tuple[str, QColor]] = []
         for item in self._classified_items:
-            if item.is_error:
-                rows.append((f"[error] {item.name}", QColor(theme.error_item_fg)))
-            elif item.class_name:
-                rows.append((f"[{item.class_name}] {item.name}", QColor(theme.classified_fg)))
-            else:
-                rows.append((item.name, QColor(theme.pending_fg)))
-        self._fill(self._classified_list, rows)
-        self._classified_header.setText(f"Classified ({len(self._classified_items)})")
+            text, key = self._label_for(item)
+            if self._matches(text):
+                self._visible_classified.append(item)
+                classified_rows.append((text, QColor(getattr(theme, key))))
 
+        self._fill(self._pending_list, pending_rows)
+        self._fill(self._classified_list, classified_rows)
+        self._pending_header.setText(
+            self._count_label("Pending", len(pending_rows), len(self._pending_items)),
+        )
+        self._classified_header.setText(
+            self._count_label("Classified", len(classified_rows), len(self._classified_items)),
+        )
+
+        if selected is not None:
+            self.select_item(selected)
         self._update_focus_style()
+
+    def _count_label(self, title: str, shown: int, total: int) -> str:
+        """Say how much the filter is hiding, or the count would look like loss."""
+        if shown == total:
+            return f"{title} ({total})"
+        return f"{title} ({shown} of {total})"
 
     @staticmethod
     def _fill(listing: QListWidget, rows: list[tuple[str, QColor]]) -> None:
-        # Preserve the cursor across a rebuild so classifying does not scroll
-        # the user back to the top of a thousand-file list.
-        previous = listing.currentRow()
         listing.blockSignals(True)
         listing.clear()
         for text, color in rows:
             entry = QListWidgetItem(text)
             entry.setForeground(color)
             listing.addItem(entry)
-        if 0 <= previous < listing.count():
-            listing.setCurrentRow(previous)
         listing.blockSignals(False)
 
     # ── focus ───────────────────────────────────────────────────────────
@@ -127,6 +199,9 @@ class FileExplorerWidget(QWidget, ThemedMixin):
     @property
     def active_list(self) -> str:
         return self._active
+
+    def _active_list(self) -> QListWidget:
+        return self._pending_list if self._active == PENDING else self._classified_list
 
     def _set_active(self, which: str) -> None:
         if which == self._active:
@@ -158,29 +233,44 @@ class FileExplorerWidget(QWidget, ThemedMixin):
 
     # ── selection ───────────────────────────────────────────────────────
 
+    def _visible(self, which: str) -> list[VideoItem]:
+        return self._visible_pending if which == PENDING else self._visible_classified
+
     def _on_row_changed(self, which: str, row: int) -> None:
-        if row < 0:
+        rows = self._visible(which)
+        if not 0 <= row < len(rows):
             return
         self._set_active(which)
-        self.file_selected.emit(which, row)
+        self.file_selected.emit(rows[row])
 
-    def select(self, which: str, row: int) -> None:
-        """Move the cursor without re-emitting :attr:`file_selected`."""
+    def selected_item(self) -> VideoItem | None:
+        rows = self._visible(self._active)
+        row = self._active_list().currentRow()
+        return rows[row] if 0 <= row < len(rows) else None
+
+    def select_item(self, item: VideoItem) -> None:
+        """Move the cursor to ``item`` without re-emitting :attr:`file_selected`.
+
+        A no-op when the filter is hiding it — the cursor stays where it is
+        rather than jumping to an unrelated row.
+        """
+        which = PENDING if item.is_pending else CLASSIFIED
+        rows = self._visible(which)
+        if item not in rows:
+            return
+
         self._set_active(which)
         listing = self._pending_list if which == PENDING else self._classified_list
+        row = rows.index(item)
         listing.blockSignals(True)
         listing.setCurrentRow(row)
         listing.blockSignals(False)
-        if 0 <= row < listing.count():
-            listing.scrollToItem(listing.item(row))
-
-    def current_row(self) -> int:
-        listing = self._pending_list if self._active == PENDING else self._classified_list
-        return listing.currentRow()
-
-    def count(self, which: str | None = None) -> int:
-        target = which or self._active
-        return len(self._pending_items if target == PENDING else self._classified_items)
+        listing.scrollToItem(listing.item(row))
 
     def items(self, which: str) -> list[VideoItem]:
+        """Everything in this list, filter or no filter."""
         return self._pending_items if which == PENDING else self._classified_items
+
+    def visible_items(self, which: str) -> list[VideoItem]:
+        """Only what the filter is currently letting through."""
+        return list(self._visible(which))

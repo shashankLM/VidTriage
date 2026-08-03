@@ -346,31 +346,33 @@ class TestModelPrompting:
         assert any("pip install nonexistent_pkg" in m for m in messages)
 
 
+@pytest.fixture
+def session_dirs(tmp_path, sample_video):
+    source = tmp_path / "in"
+    output = tmp_path / "out"
+    source.mkdir()
+    output.mkdir()
+    for name in ("a.mp4", "b.mp4", "c.mp4"):
+        shutil.copy(sample_video, source / name)
+    return source, output
+
+
+@pytest.fixture
+def triage(full_app, session_dirs, pump):
+    from vidtriage.plugins.builtin.triage.models import ClassEntry
+    from vidtriage.plugins.builtin.triage.session import Session
+
+    context, _window = full_app
+    source, output = session_dirs
+    plugin = context.plugins.plugins.require("triage")
+    plugin._start_session(
+        Session(source, output, [ClassEntry("1", "cat"), ClassEntry("2", "dog")]),
+    )
+    pump(700)
+    return context, plugin, source, output
+
+
 class TestTriageWorkflow:
-    @pytest.fixture
-    def session_dirs(self, tmp_path, sample_video):
-        source = tmp_path / "in"
-        output = tmp_path / "out"
-        source.mkdir()
-        output.mkdir()
-        for name in ("a.mp4", "b.mp4", "c.mp4"):
-            shutil.copy(sample_video, source / name)
-        return source, output
-
-    @pytest.fixture
-    def triage(self, full_app, session_dirs, pump):
-        from vidtriage.plugins.builtin.triage.models import ClassEntry
-        from vidtriage.plugins.builtin.triage.session import Session
-
-        context, _window = full_app
-        source, output = session_dirs
-        plugin = context.plugins.plugins.require("triage")
-        plugin._start_session(
-            Session(source, output, [ClassEntry("1", "cat"), ClassEntry("2", "dog")]),
-        )
-        pump(700)
-        return context, plugin, source, output
-
     def test_session_loads_the_pending_videos(self, triage):
         _context, plugin, _source, _output = triage
         assert len(plugin.session.pending) == 3
@@ -726,3 +728,242 @@ class TestHelpFormatter:
 
         args = parse_args(["--safe-mode", "-v"])
         assert args.safe_mode and args.verbose
+
+
+class TestLaunchOptions:
+    """``-i`` names a triage session, so it has to reach the triage plugin.
+
+    It did not: the flag only filled the media library, the plugin restored
+    whatever session ran last, and the file panel then described a different set
+    of videos than the player was showing.
+    """
+
+    @pytest.fixture
+    def corpus(self, tmp_path, sample_video):
+        source = tmp_path / "clips"
+        source.mkdir()
+        for name in ("x.mp4", "y.mp4"):
+            shutil.copy(sample_video, source / name)
+        return source
+
+    @staticmethod
+    def _launch(_qapp, tmp_path, pump, **options):
+        """``_qapp`` is required for its side effect: a live QApplication."""
+        context = AppContext(
+            settings=Settings(tmp_path / "settings.json"),
+            plugin_manager=PluginManager(state_file=tmp_path / "plugins.json"),
+            launch_options=options,
+        )
+        window = MainWindow(context)
+        context.plugins.discover(user_dir=None)
+        context.plugins.activate_all(context)
+        window.sync_panels()
+        pump(400)
+        return context, context.plugins.plugins.require("triage")
+
+    def test_input_dir_starts_a_session_for_that_directory(
+        self, qapp, corpus, tmp_path, pump,
+    ):
+        context, plugin = self._launch(qapp, tmp_path, pump, triage_input=corpus)
+        try:
+            assert plugin.session is not None
+            assert plugin.session.input_dir == corpus.resolve()
+            assert sorted(i.name for i in plugin.session.pending) == ["x.mp4", "y.mp4"]
+        finally:
+            context.shutdown()
+            pump(50)
+
+    def test_the_file_panel_lists_those_videos(self, qapp, corpus, tmp_path, pump):
+        context, plugin = self._launch(qapp, tmp_path, pump, triage_input=corpus)
+        try:
+            explorer = context.panels.require("triage.explorer").factory()
+            plugin._explorer = explorer
+            plugin._refresh_explorer()
+            assert [i.name for i in explorer.items("pending")] == ["x.mp4", "y.mp4"]
+        finally:
+            context.shutdown()
+            pump(50)
+
+    def test_output_dir_defaults_beside_the_input(self, qapp, corpus, tmp_path, pump):
+        context, plugin = self._launch(qapp, tmp_path, pump, triage_input=corpus)
+        try:
+            assert plugin.session.output_dir == corpus.parent / "clips_triage"
+        finally:
+            context.shutdown()
+            pump(50)
+
+    def test_an_explicit_output_dir_wins(self, qapp, corpus, tmp_path, pump):
+        target = tmp_path / "elsewhere"
+        context, plugin = self._launch(
+            qapp, tmp_path, pump, triage_input=corpus, triage_output=target,
+        )
+        try:
+            assert plugin.session.output_dir == target.resolve()
+        finally:
+            context.shutdown()
+            pump(50)
+
+    def test_a_missing_input_dir_falls_back_to_the_saved_session(
+        self, qapp, tmp_path, pump,
+    ):
+        context, plugin = self._launch(
+            qapp, tmp_path, pump, triage_input=tmp_path / "does-not-exist",
+        )
+        try:
+            assert plugin.session is None or plugin.session.input_dir.exists()
+        finally:
+            context.shutdown()
+            pump(50)
+
+
+class TestCurrentItemResolution:
+    """``current_item`` must describe the video actually on screen.
+
+    It used to index ``_order`` with the library's index. The library is shared,
+    so anything that replaced the playlist made the two disagree — and then a
+    number key filed a decision against a completely different file.
+    """
+
+    def test_a_replaced_playlist_cannot_misattribute_a_decision(
+        self, triage, pump, tmp_path, sample_video,
+    ):
+        context, plugin, _source, _output = triage
+        intruder = tmp_path / "intruder.mp4"
+        shutil.copy(sample_video, intruder)
+
+        context.library.set_items([intruder], keep_current=False)
+        pump(300)
+
+        assert context.library.current == intruder
+        assert plugin.current_item is None, (
+            "the shown video is not in the session, so no decision may be attributed"
+        )
+
+    def test_it_tracks_the_library_not_the_list_order(self, triage, pump):
+        context, plugin, _source, _output = triage
+        for index in range(len(plugin._order)):
+            context.library.set_index(index)
+            pump(120)
+            assert plugin.current_item is not None
+            assert plugin.current_item.original_path == context.library.current
+
+
+class TestFileSearch:
+    """The filter box in the file panel.
+
+    The interesting risk is not the filtering — it is that the panel used to
+    identify a clicked video by its row number. Filtering makes row N stop
+    meaning video N, so these check that clicking a filtered row still selects
+    the video that was clicked.
+    """
+
+    @pytest.fixture
+    def explorer(self, triage, pump):
+        context, plugin, _source, _output = triage
+        widget = context.panels.require("triage.explorer").factory()
+        plugin._explorer = widget
+        plugin._refresh_explorer()
+        pump(50)
+        return context, plugin, widget
+
+    def test_all_files_show_when_the_filter_is_empty(self, explorer):
+        _context, _plugin, widget = explorer
+        assert [i.name for i in widget.visible_items("pending")] == ["a.mp4", "b.mp4", "c.mp4"]
+
+    def test_filtering_narrows_the_list(self, explorer):
+        _context, _plugin, widget = explorer
+        widget._search.setText("b")
+        assert [i.name for i in widget.visible_items("pending")] == ["b.mp4"]
+
+    def test_the_filter_is_case_insensitive(self, explorer):
+        _context, _plugin, widget = explorer
+        widget._search.setText("A.MP4")
+        assert [i.name for i in widget.visible_items("pending")] == ["a.mp4"]
+
+    def test_terms_are_anded(self, explorer):
+        """Long shared prefixes are the case this exists for."""
+        _context, _plugin, widget = explorer
+        widget._search.setText("mp4 c")
+        assert [i.name for i in widget.visible_items("pending")] == ["c.mp4"]
+        widget._search.setText("mp4 zzz")
+        assert widget.visible_items("pending") == []
+
+    def test_the_header_says_what_is_hidden(self, explorer):
+        _context, _plugin, widget = explorer
+        assert widget._pending_header.text() == "Pending (3)"
+        widget._search.setText("b")
+        assert widget._pending_header.text() == "Pending (1 of 3)"
+
+    def test_the_class_name_is_searchable(self, explorer, pump):
+        from vidtriage.plugins.builtin.triage.models import ClassEntry
+
+        _context, plugin, widget = explorer
+        plugin._classify(ClassEntry("1", "cat"))
+        pump(300)
+
+        widget._search.setText("cat")
+        assert [i.name for i in widget.visible_items("classified")] == ["a.mp4"]
+        assert widget.visible_items("pending") == []
+
+    def test_clicking_a_filtered_row_selects_the_video_that_was_clicked(
+        self, explorer, pump,
+    ):
+        """Row 0 of a filtered list is not video 0 of the session."""
+        _context, _plugin, widget = explorer
+        seen = []
+        widget.file_selected.connect(seen.append)
+
+        widget._search.setText("c")
+        widget._pending_list.setCurrentRow(0)
+        pump(50)
+
+        assert [i.name for i in seen] == ["c.mp4"]
+
+    def test_the_library_follows_a_filtered_click(self, explorer, pump):
+        context, _plugin, widget = explorer
+        widget._search.setText("c")
+        widget._pending_list.setCurrentRow(0)
+        pump(300)
+        assert context.library.current.name == "c.mp4"
+
+    def test_clearing_the_filter_restores_everything(self, explorer):
+        _context, _plugin, widget = explorer
+        widget._search.setText("b")
+        widget.clear_filter()
+        assert len(widget.visible_items("pending")) == 3
+
+    def test_a_hidden_selection_does_not_jump_the_cursor(self, explorer, pump):
+        """Filtering out the current video must not silently select another."""
+        _context, _plugin, widget = explorer
+        seen = []
+        widget.file_selected.connect(seen.append)
+
+        widget._search.setText("zzz-matches-nothing")
+        pump(50)
+        assert widget.selected_item() is None
+        assert seen == [], "hiding a row is not a selection change"
+
+    def test_the_command_shows_the_panel_and_focuses_the_box(self, explorer, pump):
+        """Offscreen docks never report visible, so check what was asked for.
+
+        ``set_panel_visible`` persists the flag, and ``focusWidget`` records the
+        last child ``setFocus`` was called on — both independent of whether the
+        window is actually mapped.
+        """
+        context, plugin, widget = explorer
+        context.window.set_panel_visible("triage.explorer", False)
+        assert context.settings.get("panels.triage.explorer.visible") is False
+
+        plugin._focus_search()
+        pump(100)
+
+        assert context.settings.get("panels.triage.explorer.visible") is True
+        assert widget.focusWidget() is widget._search
+
+    def test_the_shortcut_reaches_the_help_dialog(self, triage):
+        """Help is generated from the registry, so registering is all it takes."""
+        context, _plugin, _source, _output = triage
+        command = context.commands.shortcut_map().get("Ctrl+F")
+        assert command is not None
+        assert command.id == "triage.search"
+        assert command.menu_path[0] == "View"

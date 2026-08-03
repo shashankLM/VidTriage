@@ -20,6 +20,7 @@ from .models import MAX_CLASSES, ClassEntry, TriageConfig
 
 __all__ = [
     "SESSIONS_FILE",
+    "find_session_for_input",
     "load_all_sessions",
     "load_last_session",
     "parse_classes",
@@ -79,6 +80,20 @@ def load_all_sessions() -> list[TriageConfig]:
 def load_last_session() -> TriageConfig:
     sessions = load_all_sessions()
     return sessions[0] if sessions else TriageConfig()
+
+
+def find_session_for_input(input_dir: Path) -> TriageConfig | None:
+    """The most recent saved session for this input directory, if any.
+
+    Used when a directory is named on the command line: reusing *that*
+    directory's class list is helpful, whereas inheriting the class list of
+    whatever session happened to be open last would be nonsense.
+    """
+    resolved = Path(input_dir).resolve()
+    return next(
+        (config for config in load_all_sessions() if config.input_dir == resolved),
+        None,
+    )
 
 
 def save_session(config: TriageConfig) -> None:

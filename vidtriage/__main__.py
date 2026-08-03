@@ -91,7 +91,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _collect_paths(args: argparse.Namespace) -> list[Path]:
-    """Files named on the command line, expanding any directories."""
+    """Files named positionally on the command line, expanding any directories.
+
+    ``--input`` is deliberately not consulted here. It selects a *triage
+    session*, and the triage plugin fills the playlist from that session — if
+    the shell also set the playlist from the same directory it would overwrite
+    the plugin's ordering, leaving the file panel describing one list while the
+    player showed another. See ``_open_library``.
+    """
     found: list[Path] = []
     for path in args.paths:
         if path.is_dir():
@@ -100,9 +107,23 @@ def _collect_paths(args: argparse.Namespace) -> list[Path]:
             found.append(path)
         else:
             _log.warning("Ignoring %s: not a file or directory", path)
-    if not found and args.input_dir and args.input_dir.is_dir():
-        found.extend(discover_media(args.input_dir))
     return found
+
+
+def _open_library(context: AppContext, args: argparse.Namespace) -> None:
+    """Put something in the player, unless a plugin already did.
+
+    Positional paths are an explicit instruction and always win. ``--input`` is
+    only a fallback: whoever handles it — normally triage — has had its chance
+    by now, and an empty library is the plugin-agnostic way to ask "did anyone
+    take this?" without the shell knowing which plugins exist.
+    """
+    paths = _collect_paths(args)
+    if paths:
+        context.library.set_items(paths, keep_current=False)
+        return
+    if not len(context.library) and args.input_dir and args.input_dir.is_dir():
+        context.library.set_items(discover_media(args.input_dir), keep_current=False)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,7 +146,11 @@ def main(argv: list[str] | None = None) -> int:
     context = AppContext(
         settings=settings,
         plugin_manager=manager,
-        launch_options={"triage_logs": args.logs},
+        launch_options={
+            "triage_logs": args.logs,
+            "triage_input": args.input_dir,
+            "triage_output": args.output_dir,
+        },
     )
 
     window = MainWindow(context)
@@ -142,9 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     # any panels they contributed.
     window.sync_panels()
 
-    paths = _collect_paths(args)
-    if paths:
-        context.library.set_items(paths, keep_current=False)
+    _open_library(context, args)
 
     window.show()
     return app.exec()

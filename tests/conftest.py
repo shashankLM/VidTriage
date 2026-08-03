@@ -1,27 +1,37 @@
 """Shared fixtures.
 
-Qt runs offscreen and ``HOME`` is redirected per-session, so tests never touch
-the developer's real ``~/.vidtriage`` settings, sessions, or plugin state.
+Qt runs offscreen and ``HOME`` is redirected, so tests never touch the
+developer's real ``~/.vidtriage`` settings, sessions, plugin state or triage
+logs.
+
+**The redirect happens at import time, not in a fixture, and it has to.**
+``vidtriage.persistence.settings`` computes ``CONFIG_DIR`` from ``Path.home()``
+once, at module scope. Test modules import it while pytest is *collecting*,
+which is before any fixture body runs — so a session-scoped fixture that sets
+``HOME`` sets it too late, and every test then reads and writes the real config
+directory. conftest is imported ahead of the test modules, which makes this the
+only place early enough. ``test_isolation.py`` asserts it worked.
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from pathlib import Path
+ISOLATED_HOME = Path(tempfile.mkdtemp(prefix="vidtriage-test-home-"))
+os.environ["HOME"] = str(ISOLATED_HOME)
+os.environ["USERPROFILE"] = str(ISOLATED_HOME)
 
-import numpy as np
-import pytest
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 
 
-@pytest.fixture(scope="session", autouse=True)
-def isolated_home(tmp_path_factory) -> Path:
-    home = tmp_path_factory.mktemp("home")
-    os.environ["HOME"] = str(home)
-    os.environ["USERPROFILE"] = str(home)
-    return home
+@pytest.fixture(scope="session")
+def isolated_home() -> Path:
+    return ISOLATED_HOME
 
 
 @pytest.fixture(scope="session")

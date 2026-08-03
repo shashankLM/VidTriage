@@ -39,8 +39,8 @@ from ....core.commands import Command
 from ....core.errors import VidTriageError
 from ....core.logging import attach_file_log, get_logger
 from ...api import Plugin, PluginContext
-from .config import load_last_session, parse_classes
-from .explorer import CLASSIFIED, PENDING, FileExplorerWidget
+from .config import find_session_for_input, load_last_session, parse_classes
+from .explorer import FileExplorerWidget
 from .models import MAX_CLASSES, ClassEntry, TriageConfig, VideoItem
 from .session import Session
 from .snapshot import plan_snapshot, write_snapshot
@@ -80,16 +80,42 @@ class TriagePlugin(Plugin):
         ctx.connect(ctx.app.library.current_changed, self._on_library_current_changed)
         ctx.connect(ctx.app.playback.reached_end, self._on_video_ended)
 
-        last = load_last_session()
-        if last.is_complete and last.input_dir and last.input_dir.is_dir():
-            self._start_session(
-                Session(
-                    last.input_dir, last.output_dir, last.classes,
-                    logs=ctx.app.launch_options.get("triage_logs"),
-                ),
-            )
+        session = self._session_from_launch(ctx) or self._session_from_history(ctx)
+        if session is not None:
+            self._start_session(session)
         else:
             ctx.app.status("Triage: use File ▸ Triage Session… to pick directories", 8000)
+
+    def _session_from_launch(self, ctx: PluginContext) -> Session | None:
+        """A session for the directory named with ``-i``, if one was.
+
+        The flag is documented as choosing a triage session, so it has to reach
+        here — otherwise it only fills the media library, the explorer keeps
+        showing whatever ran last, and the two disagree about what is on screen.
+        """
+        input_dir = ctx.app.launch_options.get("triage_input")
+        if input_dir is None or not Path(input_dir).is_dir():
+            return None
+
+        known = find_session_for_input(input_dir)
+        output_dir = (
+            ctx.app.launch_options.get("triage_output")
+            or (known.output_dir if known else None)
+            or Path(input_dir).parent / f"{Path(input_dir).name}_triage"
+        )
+        return Session(
+            Path(input_dir), Path(output_dir), known.classes if known else [],
+            logs=ctx.app.launch_options.get("triage_logs"),
+        )
+
+    def _session_from_history(self, ctx: PluginContext) -> Session | None:
+        last = load_last_session()
+        if not (last.is_complete and last.input_dir and last.input_dir.is_dir()):
+            return None
+        return Session(
+            last.input_dir, last.output_dir, last.classes,
+            logs=ctx.app.launch_options.get("triage_logs"),
+        )
 
     def deactivate(self) -> None:
         self._clear_class_commands()
@@ -135,6 +161,12 @@ class TriagePlugin(Plugin):
             id="triage.focus", title="Switch Pending / Classified", shortcut="Tab",
             menu="View", section="2", handler=self._toggle_list_focus,
             is_enabled=lambda: self._explorer is not None,
+        )
+        ctx.add_command(
+            id="triage.search", title="Find In Files", shortcut="Ctrl+F",
+            menu="View", section="2", order=5, handler=self._focus_search,
+            is_enabled=lambda: self.session is not None,
+            description="Filter the file panel by name or class · Esc clears",
         )
         ctx.add_command(
             id="triage.summary", title="Triage Summary", menu="View", section="8",
@@ -267,13 +299,21 @@ class TriagePlugin(Plugin):
 
     @property
     def current_item(self) -> VideoItem | None:
+        """The video on screen, resolved by path rather than by list position.
+
+        ``_order`` mirrors the library only for as long as nothing else sets the
+        playlist, and the library is shared — a command-line path list or
+        another plugin can replace it. Indexing into ``_order`` with the
+        library's index then silently returns *a different video than the one
+        being shown*, and a keystroke would file a decision against the wrong
+        file. Matching on the path cannot do that: worst case it finds nothing,
+        the classify commands disable themselves, and the mismatch is visible.
+        """
         ctx = self._ctx
         if ctx is None or self.session is None:
             return None
-        index = ctx.app.library.index
-        if 0 <= index < len(self._order):
-            return self._order[index]
-        return None
+        current = ctx.app.library.current
+        return self.session.find_by_path(current) if current is not None else None
 
     def _has_current(self) -> bool:
         return self.current_item is not None
@@ -283,29 +323,28 @@ class TriagePlugin(Plugin):
         if self._suppress_library_sync or self._explorer is None or self.session is None:
             return
         item = self.current_item
-        if item is None:
-            return
-        if item.is_pending:
-            rows = self.session.pending
-            self._explorer.select(PENDING, rows.index(item) if item in rows else 0)
-        else:
-            rows = self.session.classified
-            self._explorer.select(CLASSIFIED, rows.index(item) if item in rows else 0)
+        if item is not None:
+            self._explorer.select_item(item)
 
-    def _on_explorer_selected(self, which: str, row: int) -> None:
+    def _on_explorer_selected(self, item: VideoItem) -> None:
         ctx = self._ctx
         if ctx is None or self.session is None:
             return
-        items = self.session.pending if which == PENDING else self.session.classified
-        if not 0 <= row < len(items):
-            return
-        item = items[row]
         if item in self._order:
             ctx.app.library.set_index(self._order.index(item))
 
     def _toggle_list_focus(self) -> None:
         if self._explorer is not None:
             self._explorer.toggle_focus()
+
+    def _focus_search(self) -> None:
+        """Show the file panel if it is hidden, then put the cursor in the filter."""
+        ctx = self._ctx
+        if ctx is None or ctx.app.window is None:
+            return
+        ctx.app.window.set_panel_visible("triage.explorer", True)
+        if self._explorer is not None:
+            self._explorer.focus_search()
 
     def _on_video_ended(self, _source_id: str) -> None:
         ctx = self._ctx

@@ -229,6 +229,7 @@ it is always current. The main ones:
 | `Ctrl+E` / `Ctrl+S` | Export · save annotations now |
 | `Ctrl+=` `Ctrl+-` `Ctrl+0` `Ctrl+1` | Zoom in · out · fit · actual size |
 | `Tab` · `E` | Switch pending/classified · toggle the file panel |
+| `Ctrl+F` | Filter the file panel by name or class · `Esc` clears |
 | `Ctrl+G` | Ratio guides |
 | `F11` · `F1` · `Ctrl+Q` | Fullscreen · help · quit |
 
